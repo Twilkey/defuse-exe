@@ -50,10 +50,17 @@ export async function initDiscord(): Promise<DiscordSession> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ code }),
   });
-  const { access_token } = (await tokenRes.json()) as { access_token: string };
+  if (!tokenRes.ok) {
+    const errBody = await tokenRes.text();
+    throw new Error(`Token exchange failed (${tokenRes.status}): ${errBody}`);
+  }
+  const tokenData = (await tokenRes.json()) as { access_token?: string };
+  if (!tokenData.access_token) {
+    throw new Error("Token exchange returned no access_token — check DISCORD_CLIENT_SECRET on server");
+  }
 
   // Authenticate with the SDK so we can read user info
-  const auth = await discordSdk.commands.authenticate({ access_token });
+  const auth = await discordSdk.commands.authenticate({ access_token: tokenData.access_token });
 
   const displayName =
     (auth.user as { global_name?: string; username?: string })?.global_name

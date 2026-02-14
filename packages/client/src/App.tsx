@@ -1299,12 +1299,14 @@ export function App(): JSX.Element {
         session = await initDiscord();
       } catch (err) {
         console.error("Discord init failed, using local mode", err);
+        setStatus(`Discord init error: ${err instanceof Error ? err.message : err} — falling back`);
         const fallback = localStorage.getItem("defuse-name") || `Player-${Math.floor(Math.random() * 9999)}`;
         localStorage.setItem("defuse-name", fallback);
         session = { displayName: fallback, roomId: "default", isDiscord: false };
       }
       if (cancelled) return;
 
+      console.log("[WS] Connecting to", WS_URL);
       setStatus("Connecting...");
       ws = new WebSocket(WS_URL);
       wsRef.current = ws;
@@ -1314,6 +1316,7 @@ export function App(): JSX.Element {
         setStatus("Connected");
         send({ type: "join", displayName: session.displayName, roomId: session.roomId } as ClientEnvelope);
       };
+      ws.onerror = (ev) => { console.error("[WS] error", ev); setStatus("WebSocket error"); };
       ws.onclose = () => { setConnected(false); setStatus("Disconnected"); };
       ws.onmessage = (e) => {
         const msg = JSON.parse(String(e.data)) as ServerEnvelope;
