@@ -7,8 +7,27 @@ type Session = {
   instanceId: string;
 };
 
-const serverUrl = import.meta.env.VITE_SERVER_URL ?? "http://localhost:3001";
-const wsUrl = serverUrl.replace("http://", "ws://").replace("https://", "wss://") + "/ws";
+function normalizeServerUrl(rawValue: string | undefined): string {
+  const fallback = "http://localhost:3001";
+  const value = (rawValue ?? fallback).trim();
+
+  if (!value) return fallback;
+  if (value.startsWith("http://") || value.startsWith("https://")) return value;
+
+  return `https://${value}`;
+}
+
+function buildWsUrl(httpUrl: string): string {
+  const url = new URL(httpUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = "/ws";
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+const serverUrl = normalizeServerUrl(import.meta.env.VITE_SERVER_URL);
+const wsUrl = buildWsUrl(serverUrl);
 
 function randomId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
