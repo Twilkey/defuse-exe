@@ -1223,33 +1223,6 @@ function checkPlayerDeath(room: GameRoom): void {
     if (p.invulnMs > 0) p.invulnMs -= TICK_MS;
   }
 
-  // auto-revive after delay (solo) or if allies alive (multi)
-  const aliveCount = g.players.filter(p => p.alive).length;
-  for (const p of g.players) {
-    if (p.alive) continue;
-    // revive mechanic: if at least one alive player, revive after 5s
-    // in solo, always revive (3 revives max)
-    if (g.players.length === 1) {
-      if (p.revives < 3) {
-        p.revives++;
-        p.alive = true;
-        p.hp = Math.floor(p.maxHp * 0.5);
-        p.invulnMs = 3000;
-        // respawn at center
-        p.x = ARENA_W / 2;
-        p.y = ARENA_H / 2;
-      }
-    } else if (aliveCount > 0) {
-      p.revives++;
-      p.alive = true;
-      p.hp = Math.floor(p.maxHp * 0.3);
-      p.invulnMs = 3000;
-      // respawn near a living ally
-      const ally = g.players.find(a => a.alive);
-      if (ally) { p.x = ally.x + (Math.random() - 0.5) * 60; p.y = ally.y + (Math.random() - 0.5) * 60; }
-    }
-  }
-
   // game over if everyone dead
   if (g.players.every(p => !p.alive)) {
     endGame(room, "defeat");
@@ -1341,7 +1314,7 @@ function endGame(room: GameRoom, outcome: "victory" | "defeat"): void {
     room.game = null;
     for (const lp of room.lobby.players) lp.ready = false;
     broadcastLobby(room);
-  }, 3000);
+  }, 12000);
 }
 
 /* ── Main tick ──────────────────────────────────────────────────────── */

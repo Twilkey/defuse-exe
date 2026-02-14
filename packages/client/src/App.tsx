@@ -2,7 +2,7 @@
    DEFUSE.EXE — Multiplayer Roguelite Survivor — Client
    ═══════════════════════════════════════════════════════════════════════ */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import type {
   ClientEnvelope, ServerEnvelope, GameState, LobbyState,
   LevelUpOffer, GameResult, UpgradeDef, CosmeticChoice,
@@ -19,6 +19,11 @@ import {
   WEAPON_ASCEND_LEVEL, WEAPON_TRANSCEND_LEVEL,
 } from "@defuse/shared";
 import { initDiscord, type DiscordSession } from "./discord.js";
+
+const PhaserGame = lazy(async () => {
+  const mod = await import("./phaser/PhaserGame.js");
+  return { default: mod.PhaserGame };
+});
 
 /* ── Networking ─────────────────────────────────────────────────────── */
 
@@ -997,9 +1002,43 @@ const allNonStarterWeapons = WEAPONS.filter(w => !w.starter);
 
 /* ── Stick figure preview (for cosmetics) ───────────────────────────── */
 
+type PreviewTrailPoint = { x: number; y: number; life: number };
+
+function drawPreviewTrail(
+  ctx: CanvasRenderingContext2D,
+  trail: string,
+  points: PreviewTrailPoint[],
+): void {
+  const colors: Record<string, string[]> = {
+    spark: ["#fbbf24", "#fde68a", "#fff"],
+    flame: ["#ef4444", "#f97316", "#fbbf24"],
+    ice: ["#67e8f9", "#a5f3fc", "#fff"],
+    shadow: ["#6b21a8", "#7c3aed", "#1e1b4b"],
+    rainbow: ["#ef4444", "#fbbf24", "#4ade80", "#38bdf8", "#a855f7", "#ec4899"],
+  };
+  const cols = colors[trail] ?? colors.spark;
+
+  for (let i = 0; i < points.length; i++) {
+    const pt = points[i];
+    const alpha = Math.max(0, pt.life / 50);
+    const r = Math.max(1.5, 4 * alpha);
+    ctx.globalAlpha = alpha * 0.85;
+    ctx.fillStyle = cols[i % cols.length];
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
 function drawStickPreview(
   ctx: CanvasRenderingContext2D, cx: number, cy: number,
-  color: string, hat: string, tick: number
+  color: string,
+  hat: string,
+  trail: string,
+  visual: string,
+  tick: number,
+  trailPoints: PreviewTrailPoint[],
 ): void {
   const s = 2.2;
   const headR = 5 * s;
@@ -1007,50 +1046,80 @@ function drawStickPreview(
   const armLen = 10 * s;
   const legLen = 12 * s;
 
-  const bob = Math.sin(tick * 0.06) * 2;
-  const armWave = Math.sin(tick * 0.08) * 0.3;
+  const movePhase = tick * 0.05;
+  const walkSwing = Math.sin(tick * 0.15);
+  const bob = Math.abs(Math.sin(tick * 0.15)) * 2;
+  const x = cx + Math.sin(movePhase) * 26;
+  const y = cy;
 
-  const headCY = cy - bodyLen - headR + bob;
-  const shoulderY = cy - bodyLen * 0.7 + bob;
-  const hipY = cy + bob;
+  const headCY = y - bodyLen - headR - bob;
+  const shoulderY = y - bodyLen * 0.7 - bob;
+  const hipY = y - bob;
+
+  if (trail && trail !== "none") {
+    const footY = hipY + legLen + 2;
+    trailPoints.push({ x, y: footY, life: 50 });
+    while (trailPoints.length > 36) trailPoints.shift();
+    for (const pt of trailPoints) pt.life -= 1;
+    while (trailPoints.length > 0 && trailPoints[0].life <= 0) trailPoints.shift();
+    drawPreviewTrail(ctx, trail, trailPoints);
+  } else {
+    trailPoints.length = 0;
+  }
 
   ctx.strokeStyle = color;
   ctx.lineWidth = 2.5 * s;
   ctx.lineCap = "round";
 
-  // Head
-  ctx.beginPath(); ctx.arc(cx, headCY, headR, 0, Math.PI * 2); ctx.stroke();
-
-  // Eyes
-  ctx.fillStyle = color;
-  ctx.beginPath(); ctx.arc(cx - 3 * s, headCY - 1, 1.2 * s, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.arc(cx + 3 * s, headCY - 1, 1.2 * s, 0, Math.PI * 2); ctx.fill();
-
-  // Smile
-  ctx.lineWidth = 1.5 * s;
-  ctx.beginPath();
-  ctx.arc(cx, headCY + 1 * s, 2.5 * s, 0.1 * Math.PI, 0.9 * Math.PI);
-  ctx.stroke();
-  ctx.lineWidth = 2.5 * s;
-
-  // Body
-  ctx.beginPath(); ctx.moveTo(cx, headCY + headR); ctx.lineTo(cx, hipY); ctx.stroke();
-
-  // Arms (idle wave)
-  ctx.beginPath(); ctx.moveTo(cx, shoulderY);
-  ctx.lineTo(cx - armLen * Math.cos(armWave), shoulderY + armLen * Math.abs(Math.sin(armWave + Math.PI / 3)));
-  ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx, shoulderY);
-  ctx.lineTo(cx + armLen * Math.cos(-armWave + 0.5), shoulderY + armLen * Math.abs(Math.sin(-armWave + Math.PI / 4)));
-  ctx.stroke();
-
-  // Legs
-  ctx.beginPath(); ctx.moveTo(cx, hipY); ctx.lineTo(cx - legLen * 0.35, hipY + legLen); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx, hipY); ctx.lineTo(cx + legLen * 0.35, hipY + legLen); ctx.stroke();
+  if (visual === "ghost_player") {
+    ctx.globalAlpha = 0.7;
+    ctx.beginPath(); ctx.arc(x, headCY, headR * 1.2, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(x - 2.5 * s, headCY - 1, 1.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + 2.5 * s, headCY - 1, 1.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(x - headR * 1.1, headCY + headR * 0.6);
+    for (let i = 0; i <= 6; i++) {
+      const t2 = i / 6;
+      const yy = headCY + headR + t2 * (bodyLen + legLen);
+      const wave = Math.sin(tick * 0.12 + t2 * 4) * 3 * s;
+      const taper = 1 - t2 * 0.6;
+      ctx.lineTo(x + wave + (i % 2 === 0 ? -1 : 1) * headR * taper, yy);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  } else if (visual === "cat") {
+    ctx.beginPath(); ctx.arc(x, headCY, headR, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x - headR * 0.7, headCY - headR * 0.4); ctx.lineTo(x - headR * 0.3, headCY - headR * 1.4); ctx.lineTo(x, headCY - headR * 0.5); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x + headR * 0.7, headCY - headR * 0.4); ctx.lineTo(x + headR * 0.3, headCY - headR * 1.4); ctx.lineTo(x, headCY - headR * 0.5); ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(x - 2 * s, headCY - 0.5, 1.2 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + 2 * s, headCY - 0.5, 1.2 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(x, headCY + headR); ctx.lineTo(x, hipY); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, hipY); ctx.lineTo(x - legLen * 0.45 * walkSwing, hipY + legLen * 0.9); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, hipY); ctx.lineTo(x + legLen * 0.45 * walkSwing, hipY + legLen * 0.9); ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.arc(x, headCY, headR, 0, Math.PI * 2); ctx.stroke();
+    if (visual === "female") {
+      ctx.beginPath(); ctx.moveTo(x - headR * 0.9, headCY - headR * 0.2); ctx.lineTo(x - headR * 1.1, headCY + headR * 1.8); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x + headR * 0.9, headCY - headR * 0.2); ctx.lineTo(x + headR * 1.1, headCY + headR * 1.8); ctx.stroke();
+    }
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(x - 3 * s, headCY - 1, 1.2 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + 3 * s, headCY - 1, 1.2 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(x, headCY + headR); ctx.lineTo(x, hipY); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, shoulderY); ctx.lineTo(x - armLen * 0.6 * Math.sin(walkSwing), shoulderY + armLen * 0.8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, shoulderY); ctx.lineTo(x + armLen * 0.6 * Math.sin(walkSwing), shoulderY + armLen * 0.8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, hipY); ctx.lineTo(x - legLen * 0.45 * walkSwing, hipY + legLen); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, hipY); ctx.lineTo(x + legLen * 0.45 * walkSwing, hipY + legLen); ctx.stroke();
+    if (visual === "female") {
+      ctx.beginPath(); ctx.moveTo(x - 5 * s, hipY - 2 * s); ctx.lineTo(x + 5 * s, hipY - 2 * s); ctx.lineTo(x + 6 * s, hipY + 3 * s); ctx.lineTo(x - 6 * s, hipY + 3 * s); ctx.closePath(); ctx.stroke();
+    }
+  }
 
   // Hat
   if (hat && hat !== "none") {
-    drawHat(ctx, cx, headCY, headR, hat);
+    drawHat(ctx, x, headCY, headR, hat);
   }
 }
 
@@ -1069,6 +1138,7 @@ function LobbyScreen({
   const previewRef = useRef<HTMLCanvasElement>(null);
   const previewTick = useRef(0);
   const previewAnim = useRef(0);
+  const previewTrail = useRef<PreviewTrailPoint[]>([]);
 
   if (!me) return <div className="menu-screen"><p style={{ textAlign: "center", paddingTop: 80 }}>Joining...</p></div>;
 
@@ -1085,13 +1155,26 @@ function LobbyScreen({
           ctx.clearRect(0, 0, 140, 180);
           const charDef = getCharacter(me.characterId);
           const color = me.cosmetic.colorOverride || charDef?.color || "#38bdf8";
-          drawStickPreview(ctx, 70, 110, color, me.cosmetic.hat ?? "none", previewTick.current);
+          drawStickPreview(
+            ctx,
+            70,
+            108,
+            color,
+            me.cosmetic.hat ?? "none",
+            me.cosmetic.trail ?? "none",
+            charDef?.visual || "male",
+            previewTick.current,
+            previewTrail.current,
+          );
         }
       }
       previewAnim.current = requestAnimationFrame(renderPreview);
     }
     previewAnim.current = requestAnimationFrame(renderPreview);
-    return () => cancelAnimationFrame(previewAnim.current);
+    return () => {
+      previewTrail.current = [];
+      cancelAnimationFrame(previewAnim.current);
+    };
   }, [me.characterId, me.cosmetic]);
 
   const tabs = ["HERO", "ARMS", "STYLE", "BANS"];
@@ -1453,7 +1536,7 @@ function PlayerInspectPanel({ player, onClose }: { player: PlayerState; onClose:
   );
 }
 
-function HUD({ state, myId }: { state: GameState; myId: string }): JSX.Element {
+function HUD({ state, myId, compact = false }: { state: GameState; myId: string; compact?: boolean }): JSX.Element {
   const me = state.players.find(p => p.id === myId);
   const elapsed = state.elapsedMs ?? 0;
   const eMins = Math.floor(elapsed / 60000);
@@ -1466,34 +1549,39 @@ function HUD({ state, myId }: { state: GameState; myId: string }): JSX.Element {
 
   return (
     <div className="hud-overlay">
-      <div className="hud-top">
-        <div className="hud-stat">
-          <small>Time</small><strong>{eMins}:{eSecs.toString().padStart(2, "0")}</strong>
-        </div>
-        <div className="hud-stat">
-          <small>Level</small><strong>{state.sharedLevel}</strong>
-        </div>
-        <div className="hud-stat">
-          <small>Enemies</small><strong>{state.enemies.length}</strong>
-        </div>
-        <div className="hud-stat">
-          <small>Kills</small><strong>{me?.killCount ?? 0}</strong>
-        </div>
-      </div>
+      {!compact && (
+        <>
+          <div className="hud-top">
+            <div className="hud-stat">
+              <small>Time</small><strong>{eMins}:{eSecs.toString().padStart(2, "0")}</strong>
+            </div>
+            <div className="hud-stat">
+              <small>Level</small><strong>{state.sharedLevel}</strong>
+            </div>
+            <div className="hud-stat">
+              <small>Enemies</small><strong>{state.enemies.length}</strong>
+            </div>
+            <div className="hud-stat">
+              <small>Kills</small><strong>{me?.killCount ?? 0}</strong>
+            </div>
+          </div>
 
-      {/* XP bar */}
-      <div className="xp-bar-container">
-        <div className="xp-bar-fill" style={{ width: `${(state.sharedXp / state.xpToNext) * 100}%` }} />
-        <span className="xp-text">XP {state.sharedXp}/{state.xpToNext}</span>
-      </div>
+          <div className="xp-bar-container">
+            <div className="xp-bar-fill" style={{ width: `${(state.sharedXp / state.xpToNext) * 100}%` }} />
+            <span className="xp-text">XP {state.sharedXp}/{state.xpToNext}</span>
+          </div>
+        </>
+      )}
 
       {/* Player HP + weapons + tokens */}
       {me && (
         <div className="hud-bottom-left">
-          <div className="hp-bar-container">
-            <div className="hp-bar-fill" style={{ width: `${(me.hp / me.maxHp) * 100}%` }} />
-            <span className="hp-text">{me.hp}/{me.maxHp} HP</span>
-          </div>
+          {!compact && (
+            <div className="hp-bar-container">
+              <div className="hp-bar-fill" style={{ width: `${(me.hp / me.maxHp) * 100}%` }} />
+              <span className="hp-text">{me.hp}/{me.maxHp} HP</span>
+            </div>
+          )}
           <div className="weapon-slots">
             {me.weapons.map(ws => {
               const wDef = getWeapon(ws.weaponId);
@@ -1570,49 +1658,6 @@ function HUD({ state, myId }: { state: GameState; myId: string }): JSX.Element {
       {inspectedPlayer && (
         <PlayerInspectPanel player={inspectedPlayer} onClose={() => setInspectPlayer(null)} />
       )}
-    </div>
-  );
-}
-
-/* ── Level-up modal ─────────────────────────────────────────────────── */
-
-function LevelUpModal({ offer, send, onClose }: { offer: LevelUpOffer; send: (e: ClientEnvelope) => void; onClose: () => void }): JSX.Element {
-  return (
-    <div className="modal-overlay">
-      <div className="modal">
-        <h2>Level Up!</h2>
-        <p>Choose an upgrade:</p>
-        <div className="upgrade-options">
-          {offer.options.map(opt => (
-            <button
-              key={opt.id}
-              className="upgrade-card"
-              onClick={() => { send({ type: "pick_upgrade", upgradeId: opt.id }); onClose(); }}
-            >
-              <strong>{opt.name}</strong>
-              <p>{opt.description}</p>
-              {opt.group && <span className="group-badge">GROUP</span>}
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ── Vote continue modal ────────────────────────────────────────────── */
-
-function VoteContinueModal({ state, send }: { state: GameState; send: (e: ClientEnvelope) => void }): JSX.Element {
-  return (
-    <div className="modal-overlay">
-      <div className="modal">
-        <h2>Boss Defeated!</h2>
-        <p>Keep going? Bosses will continue spawning every {5} waves.</p>
-        <p>Votes: {state.continueVotes.length}/{Math.ceil(state.players.length * 0.5)} needed</p>
-        <button className="big-btn accent" onClick={() => send({ type: "vote_continue" })}>
-          Keep Going!
-        </button>
-      </div>
     </div>
   );
 }
@@ -1764,12 +1809,9 @@ export function App(): JSX.Element {
     targetingMode: "closest",
   });
   const wsRef = useRef<WebSocket | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const animRef = useRef<number>(0);
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
   const lastGameStateRef = useRef<GameState | null>(null);
   const cursorWorldRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
-  const settingsRef = useRef(settings);
-  settingsRef.current = settings;
 
   const send = useCallback((env: ClientEnvelope) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -1780,6 +1822,15 @@ export function App(): JSX.Element {
   const handleSettingsChange = useCallback((newSettings: PlayerSettings) => {
     setSettings(newSettings);
     send({ type: "update_settings", settings: newSettings });
+  }, [send]);
+
+  const handlePickUpgrade = useCallback((upgradeId: string) => {
+    send({ type: "pick_upgrade", upgradeId });
+    setLevelUp(null);
+  }, [send]);
+
+  const handleVoteContinue = useCallback(() => {
+    send({ type: "vote_continue" });
   }, [send]);
 
   // WebSocket
@@ -1826,6 +1877,14 @@ export function App(): JSX.Element {
             setLevelUp(null);
             break;
           case "state":
+            if (
+              lastGameStateRef.current
+              && lastGameStateRef.current.phase === "active"
+              && msg.state.phase === "active"
+              && msg.state.tick < lastGameStateRef.current.tick
+            ) {
+              break;
+            }
             setGameState(msg.state);
             lastGameStateRef.current = msg.state;
             setLobby(null);
@@ -1875,18 +1934,18 @@ export function App(): JSX.Element {
     const handleUp = (e: KeyboardEvent) => keysDown.delete(e.key.toLowerCase());
 
     const handleMouseMove = (e: MouseEvent) => {
-      const canvas = canvasRef.current;
+      const surface = surfaceRef.current;
       const state = lastGameStateRef.current;
-      if (!canvas || !state) return;
+      if (!surface || !state) return;
       const me = state.players.find(p => p.id === myId);
       if (!me) return;
-      const rect = canvas.getBoundingClientRect();
+      const rect = surface.getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my2 = e.clientY - rect.top;
       // Convert screen coords back to world coords
       cursorWorldRef.current = {
-        x: me.x + (mx - canvas.clientWidth / 2),
-        y: me.y + (my2 - canvas.clientHeight / 2),
+        x: me.x + (mx - surface.clientWidth / 2),
+        y: me.y + (my2 - surface.clientHeight / 2),
       };
     };
 
@@ -1909,25 +1968,6 @@ export function App(): JSX.Element {
     };
   }, [gameState, send, myId, showSettings]);
 
-  // Canvas render loop
-  useEffect(() => {
-    function frame() {
-      const canvas = canvasRef.current;
-      const state = lastGameStateRef.current;
-      if (canvas && state) {
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          canvas.width = canvas.clientWidth;
-          canvas.height = canvas.clientHeight;
-          renderGame(ctx, state, myId, canvas.width, canvas.height, settingsRef.current);
-        }
-      }
-      animRef.current = requestAnimationFrame(frame);
-    }
-    animRef.current = requestAnimationFrame(frame);
-    return () => cancelAnimationFrame(animRef.current);
-  }, [myId]);
-
   // Results screen
   if (result) {
     return <ResultsScreen result={result} send={send} />;
@@ -1941,10 +1981,25 @@ export function App(): JSX.Element {
   // Game
   return (
     <div className="game-container">
-      <canvas ref={canvasRef} className="game-canvas" />
-      {gameState && <HUD state={gameState} myId={myId} />}
-      {levelUp && <LevelUpModal offer={levelUp} send={send} onClose={() => setLevelUp(null)} />}
-      {gameState?.phase === "vote_continue" && <VoteContinueModal state={gameState} send={send} />}
+      <div ref={surfaceRef} className="game-surface">
+        {gameState ? (
+          <Suspense fallback={<div className="game-canvas phaser-root" />}>
+            <PhaserGame
+              state={gameState}
+              myId={myId}
+              settings={settings}
+              levelUpOffer={levelUp}
+              onPickUpgrade={handlePickUpgrade}
+              onVoteContinue={handleVoteContinue}
+              bossWarning={bossWarning}
+              ascensionMsg={ascensionMsg}
+              transcendMsg={transcendMsg}
+            />
+          </Suspense>
+        ) : (
+          <div className="game-canvas phaser-root" />
+        )}
+      </div>
 
       {showPause && !showSettings && (
         <PauseMenu
@@ -1959,26 +2014,6 @@ export function App(): JSX.Element {
           onChange={handleSettingsChange}
           onClose={() => setShowSettings(false)}
         />
-      )}
-
-      {bossWarning && (
-        <div className="boss-warning">
-          <h2>⚠ {bossWarning} INCOMING ⚠</h2>
-        </div>
-      )}
-
-      {ascensionMsg && (
-        <div className="ascension-banner">
-          <h2>★ ASCENSION ★</h2>
-          <p>{ascensionMsg}</p>
-        </div>
-      )}
-
-      {transcendMsg && (
-        <div className="ascension-banner" style={{ background: "rgba(139,92,246,0.15)", borderColor: "#c084fc" }}>
-          <h2 style={{ color: "#c084fc" }}>✦ TRANSCENDENCE ✦</h2>
-          <p>{transcendMsg}</p>
-        </div>
       )}
 
       {!connected && <div className="disconnect-overlay"><p>{status}</p></div>}
