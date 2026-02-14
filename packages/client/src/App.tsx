@@ -1307,7 +1307,7 @@ export function App(): JSX.Element {
       if (cancelled) return;
 
       console.log("[WS] Connecting to", WS_URL);
-      setStatus("Connecting...");
+      setStatus(`Connecting to ${WS_URL} ...`);
       ws = new WebSocket(WS_URL);
       wsRef.current = ws;
 
@@ -1316,8 +1316,8 @@ export function App(): JSX.Element {
         setStatus("Connected");
         send({ type: "join", displayName: session.displayName, roomId: session.roomId } as ClientEnvelope);
       };
-      ws.onerror = (ev) => { console.error("[WS] error", ev); setStatus("WebSocket error"); };
-      ws.onclose = () => { setConnected(false); setStatus("Disconnected"); };
+      ws.onerror = () => { setStatus(`WS error — target: ${WS_URL} | origin: ${window.location.origin}`); };
+      ws.onclose = (ev) => { setConnected(false); setStatus(`Disconnected (code ${ev.code}) — target: ${WS_URL}`); };
       ws.onmessage = (e) => {
         const msg = JSON.parse(String(e.data)) as ServerEnvelope;
         switch (msg.type) {
