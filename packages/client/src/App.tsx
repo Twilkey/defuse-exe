@@ -20,14 +20,9 @@ import { initDiscord, type DiscordSession } from "./discord.js";
 
 /* ── Networking ─────────────────────────────────────────────────────── */
 
-function normalizeUrl(raw: string | undefined): string {
-  const v = (raw ?? "").trim();
-  if (!v) {
-    // No explicit URL — derive from current page origin (works on Railway / Discord)
-    return window.location.origin;
-  }
-  if (v.startsWith("http://") || v.startsWith("https://")) return v;
-  return `https://${v}`;
+function normalizeUrl(_raw: string | undefined): string {
+  // Always derive from current page — client and server share the same origin
+  return window.location.origin;
 }
 function wsUrl(http: string): string {
   const u = new URL(http);
