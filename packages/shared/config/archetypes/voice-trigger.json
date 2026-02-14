@@ -1,8 +1,0 @@
-{
-  "id": "voice-trigger",
-  "name": "Voice Trigger",
-  "allowedModules": ["wires", "dial", "glyph", "power", "conduit", "memory", "switches", "reactor"],
-  "ruleWeights": { "core": 1.1, "spice": 1.2, "deception": 0.9 },
-  "talkModeWeights": { "shared_pool": 0.4, "tokenized_burst": 0.1, "silence_windows": 0.2, "one_speaker_rule": 0.3 },
-  "skinTheme": "pulse"
-}

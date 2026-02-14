@@ -1,665 +1,926 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { BombSpec, ClientEnvelope, MatchAction, PublicMatchView, RoleBrief, ServerEnvelope } from "@defuse/shared";
+/* ═══════════════════════════════════════════════════════════════════════
+   DEFUSE.EXE — Multiplayer Roguelite Survivor — Client
+   ═══════════════════════════════════════════════════════════════════════ */
 
-type Session = {
-  userId: string;
-  displayName: string;
-  instanceId: string;
-};
+import { useCallback, useEffect, useRef, useState } from "react";
+import type {
+  ClientEnvelope, ServerEnvelope, GameState, LobbyState,
+  LevelUpOffer, GameResult, UpgradeDef, CosmeticChoice,
+  PlayerState, EnemyState, ProjectileState, BombZoneState,
+  XpGemState, DamageNumber,
+} from "@defuse/shared";
+import {
+  CHARACTERS, WEAPONS, TOKENS, ASCENDED_WEAPONS,
+  ARENA_W, ARENA_H, PLAYER_RADIUS,
+  getWeapon, getCharacter, getEnemy,
+  HATS, TRAILS, COLOR_OVERRIDES,
+  MAX_BLACKLISTED_WEAPONS, MAX_BLACKLISTED_TOKENS,
+} from "@defuse/shared";
 
-function normalizeServerUrl(rawValue: string | undefined): string {
-  const fallback = "http://localhost:3001";
-  const value = (rawValue ?? fallback).trim();
+/* ── Networking ─────────────────────────────────────────────────────── */
 
-  if (!value) return fallback;
-  if (value.startsWith("http://") || value.startsWith("https://")) return value;
+function normalizeUrl(raw: string | undefined): string {
+  const v = (raw ?? "http://localhost:3001").trim();
+  if (!v) return "http://localhost:3001";
+  if (v.startsWith("http://") || v.startsWith("https://")) return v;
+  return `https://${v}`;
+}
+function wsUrl(http: string): string {
+  const u = new URL(http);
+  u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+  u.pathname = "/ws"; u.search = ""; u.hash = "";
+  return u.toString();
+}
+const SERVER = normalizeUrl(import.meta.env.VITE_SERVER_URL);
+const WS_URL = wsUrl(SERVER);
 
-  return `https://${value}`;
+/* ── Input ──────────────────────────────────────────────────────────── */
+
+const keysDown = new Set<string>();
+function inputVector(): { dx: number; dy: number } {
+  let dx = 0, dy = 0;
+  if (keysDown.has("a") || keysDown.has("arrowleft")) dx -= 1;
+  if (keysDown.has("d") || keysDown.has("arrowright")) dx += 1;
+  if (keysDown.has("w") || keysDown.has("arrowup")) dy -= 1;
+  if (keysDown.has("s") || keysDown.has("arrowdown")) dy += 1;
+  return { dx, dy };
 }
 
-function buildWsUrl(httpUrl: string): string {
-  const url = new URL(httpUrl);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.pathname = "/ws";
-  url.search = "";
-  url.hash = "";
-  return url.toString();
+/* ── Canvas Renderer ────────────────────────────────────────────────── */
+
+interface Camera { x: number; y: number; scale: number; }
+
+function worldToScreen(wx: number, wy: number, cam: Camera, cw: number, ch: number): [number, number] {
+  return [(wx - cam.x) * cam.scale + cw / 2, (wy - cam.y) * cam.scale + ch / 2];
 }
 
-const serverUrl = normalizeServerUrl(import.meta.env.VITE_SERVER_URL);
-const wsUrl = buildWsUrl(serverUrl);
-const tutorialLevelKey = "defuse-tutorial-level";
+function renderGame(
+  ctx: CanvasRenderingContext2D, state: GameState, myId: string,
+  cw: number, ch: number
+): void {
+  const me = state.players.find(p => p.id === myId);
+  const cam: Camera = { x: me?.x ?? ARENA_W / 2, y: me?.y ?? ARENA_H / 2, scale: 1.0 };
 
-function getStoredTutorialLevel(): number {
-  const raw = Number(localStorage.getItem(tutorialLevelKey) ?? "1");
-  if (!Number.isFinite(raw)) return 1;
-  return Math.max(1, Math.min(3, Math.floor(raw)));
+  ctx.clearRect(0, 0, cw, ch);
+
+  // background
+  ctx.fillStyle = "#0a0f1a";
+  ctx.fillRect(0, 0, cw, ch);
+
+  // arena bounds
+  const [ax, ay] = worldToScreen(0, 0, cam, cw, ch);
+  const [bx, by] = worldToScreen(ARENA_W, ARENA_H, cam, cw, ch);
+  ctx.strokeStyle = "rgba(56,189,248,0.15)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(ax, ay, bx - ax, by - ay);
+
+  // grid
+  ctx.strokeStyle = "rgba(148,163,184,0.05)";
+  ctx.lineWidth = 1;
+  for (let gx = 0; gx <= ARENA_W; gx += 200) {
+    const [sx] = worldToScreen(gx, 0, cam, cw, ch);
+    ctx.beginPath(); ctx.moveTo(sx, ay); ctx.lineTo(sx, by); ctx.stroke();
+  }
+  for (let gy = 0; gy <= ARENA_H; gy += 200) {
+    const [, sy] = worldToScreen(0, gy, cam, cw, ch);
+    ctx.beginPath(); ctx.moveTo(ax, sy); ctx.lineTo(bx, sy); ctx.stroke();
+  }
+
+  // bomb zones
+  for (const zone of state.bombZones) {
+    drawBombZone(ctx, zone, cam, cw, ch, state.tick);
+  }
+
+  // XP gems
+  for (const gem of state.xpGems) {
+    drawXpGem(ctx, gem, cam, cw, ch);
+  }
+
+  // projectiles
+  for (const proj of state.projectiles) {
+    drawProjectile(ctx, proj, cam, cw, ch);
+  }
+
+  // enemies
+  for (const enemy of state.enemies) {
+    drawEnemy(ctx, enemy, cam, cw, ch);
+  }
+
+  // players
+  for (const player of state.players) {
+    drawPlayer(ctx, player, cam, cw, ch, player.id === myId);
+  }
+
+  // damage numbers
+  for (const dn of state.damageNumbers) {
+    drawDamageNumber(ctx, dn, cam, cw, ch);
+  }
+
+  // minimap
+  drawMinimap(ctx, state, myId, cw, ch);
 }
 
-function randomId(prefix: string): string {
-  return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
+function drawPlayer(ctx: CanvasRenderingContext2D, p: PlayerState, cam: Camera, cw: number, ch: number, isMe: boolean): void {
+  if (!p.alive) return;
+  const [sx, sy] = worldToScreen(p.x, p.y, cam, cw, ch);
+  const charDef = getCharacter(p.characterId);
+  const color = p.cosmetic.colorOverride || charDef?.color || "#38bdf8";
+  const r = PLAYER_RADIUS * cam.scale;
+
+  // invuln glow
+  if (p.invulnMs > 0) {
+    ctx.globalAlpha = 0.3 + Math.sin(Date.now() * 0.01) * 0.2;
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(sx, sy, r + 4, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // body
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2); ctx.fill();
+
+  // outline for local player
+  if (isMe) {
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // direction indicator
+  ctx.strokeStyle = "#fff";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(sx, sy);
+  ctx.lineTo(sx + p.dx * r * 1.4, sy + p.dy * r * 1.4);
+  ctx.stroke();
+
+  // hat
+  if (p.cosmetic.hat && p.cosmetic.hat !== "none") {
+    drawHat(ctx, sx, sy, r, p.cosmetic.hat);
+  }
+
+  // health bar
+  if (p.hp < p.maxHp) {
+    const bw = r * 2.5;
+    const bx = sx - bw / 2;
+    const bTop = sy - r - 8;
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(bx, bTop, bw, 4);
+    ctx.fillStyle = p.hp / p.maxHp > 0.3 ? "#4ade80" : "#ef4444";
+    ctx.fillRect(bx, bTop, bw * (p.hp / p.maxHp), 4);
+  }
+
+  // name
+  ctx.fillStyle = "#fff";
+  ctx.font = "10px Inter, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(p.displayName, sx, sy + r + 14);
 }
 
-function getInstanceId(): string {
-  const url = new URL(window.location.href);
-  return (
-    url.searchParams.get("instance_id") ??
-    url.searchParams.get("instanceId") ??
-    localStorage.getItem("defuse-instance-id") ??
-    "local-instance"
-  );
+function drawHat(ctx: CanvasRenderingContext2D, sx: number, sy: number, r: number, hat: string): void {
+  ctx.fillStyle = "#fde68a";
+  switch (hat) {
+    case "halo":
+      ctx.strokeStyle = "#fde68a"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.ellipse(sx, sy - r - 4, r * 0.7, 3, 0, 0, Math.PI * 2); ctx.stroke();
+      break;
+    case "crown":
+      ctx.beginPath();
+      ctx.moveTo(sx - r * 0.6, sy - r);
+      ctx.lineTo(sx - r * 0.4, sy - r - 8);
+      ctx.lineTo(sx, sy - r - 3);
+      ctx.lineTo(sx + r * 0.4, sy - r - 8);
+      ctx.lineTo(sx + r * 0.6, sy - r);
+      ctx.closePath(); ctx.fill();
+      break;
+    case "horns":
+      ctx.fillStyle = "#ef4444";
+      ctx.beginPath(); ctx.moveTo(sx - r * 0.5, sy - r); ctx.lineTo(sx - r * 0.8, sy - r - 10); ctx.lineTo(sx - r * 0.2, sy - r); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(sx + r * 0.5, sy - r); ctx.lineTo(sx + r * 0.8, sy - r - 10); ctx.lineTo(sx + r * 0.2, sy - r); ctx.fill();
+      break;
+    case "antenna":
+      ctx.strokeStyle = "#4ade80"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(sx, sy - r); ctx.lineTo(sx, sy - r - 12); ctx.stroke();
+      ctx.fillStyle = "#4ade80";
+      ctx.beginPath(); ctx.arc(sx, sy - r - 12, 3, 0, Math.PI * 2); ctx.fill();
+      break;
+    case "tophat":
+      ctx.fillStyle = "#1e293b";
+      ctx.fillRect(sx - r * 0.5, sy - r - 10, r, 10);
+      ctx.fillRect(sx - r * 0.7, sy - r, r * 1.4, 3);
+      break;
+  }
 }
 
-function formatHex(value: number): string {
-  return value.toString(16).toUpperCase();
+function drawEnemy(ctx: CanvasRenderingContext2D, e: EnemyState, cam: Camera, cw: number, ch: number): void {
+  const [sx, sy] = worldToScreen(e.x, e.y, cam, cw, ch);
+  const def = getEnemy(e.defId);
+  if (!def) return;
+  const size = def.size * cam.scale * (e.rank === "boss" ? 2.5 : e.rank === "miniboss" ? 1.8 : e.rank === "elite" ? 1.3 : 1);
+
+  // elite/boss glow
+  if (e.rank !== "normal") {
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = e.rank === "boss" ? "#dc2626" : e.rank === "miniboss" ? "#f97316" : "#fbbf24";
+    ctx.beginPath(); ctx.arc(sx, sy, size + 6, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.fillStyle = def.color;
+  switch (def.shape) {
+    case "circle":
+      ctx.beginPath(); ctx.arc(sx, sy, size, 0, Math.PI * 2); ctx.fill();
+      break;
+    case "triangle":
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - size);
+      ctx.lineTo(sx - size, sy + size * 0.7);
+      ctx.lineTo(sx + size, sy + size * 0.7);
+      ctx.closePath(); ctx.fill();
+      break;
+    case "diamond":
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - size);
+      ctx.lineTo(sx + size, sy);
+      ctx.lineTo(sx, sy + size);
+      ctx.lineTo(sx - size, sy);
+      ctx.closePath(); ctx.fill();
+      break;
+    case "square":
+      ctx.fillRect(sx - size, sy - size, size * 2, size * 2);
+      break;
+    case "hexagon": {
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const angle = (Math.PI / 3) * i - Math.PI / 2;
+        const hx = sx + size * Math.cos(angle);
+        const hy = sy + size * Math.sin(angle);
+        if (i === 0) ctx.moveTo(hx, hy); else ctx.lineTo(hx, hy);
+      }
+      ctx.closePath(); ctx.fill();
+      break;
+    }
+  }
+
+  // health bar
+  if (e.hp < e.maxHp) {
+    const bw = size * 2.5;
+    const bx = sx - bw / 2;
+    const bTop = sy - size - 6;
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(bx, bTop, bw, 3);
+    ctx.fillStyle = "#ef4444";
+    ctx.fillRect(bx, bTop, bw * Math.max(0, e.hp / e.maxHp), 3);
+  }
+
+  // rank indicator
+  if (e.rank === "boss" || e.rank === "miniboss") {
+    ctx.fillStyle = "#fff";
+    ctx.font = `bold ${Math.floor(size * 0.6)}px Inter, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.fillText(def.name, sx, sy + size + 14);
+  }
 }
 
-function DialVisualizer({ value, max }: { value: number; max: number }): JSX.Element {
-  const angle = (value / max) * 300 - 150;
-  return (
-    <svg className="dial-svg" viewBox="0 0 140 140" role="img" aria-label="Dial Visualizer">
-      <circle cx="70" cy="70" r="58" className="dial-ring" />
-      <circle cx="70" cy="70" r="45" className="dial-core" />
-      <line
-        x1="70"
-        y1="70"
-        x2={70 + 42 * Math.cos((angle * Math.PI) / 180)}
-        y2={70 + 42 * Math.sin((angle * Math.PI) / 180)}
-        className="dial-needle"
-      />
-    </svg>
-  );
+function drawProjectile(ctx: CanvasRenderingContext2D, p: ProjectileState, cam: Camera, cw: number, ch: number): void {
+  const [sx, sy] = worldToScreen(p.x, p.y, cam, cw, ch);
+  const size = Math.max(3, p.area * 0.5 * cam.scale);
+
+  if (p.pattern === "ring") {
+    ctx.strokeStyle = p.color;
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.6;
+    ctx.beginPath(); ctx.arc(sx, sy, p.area * cam.scale, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 1;
+    return;
+  }
+
+  if (p.pattern === "ground") {
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = 0.3;
+    ctx.beginPath(); ctx.arc(sx, sy, p.area * cam.scale, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+    return;
+  }
+
+  if (p.pattern === "beam") {
+    ctx.strokeStyle = p.color;
+    ctx.lineWidth = 3;
+    ctx.globalAlpha = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(sx + p.dx * 300 * cam.scale, sy + p.dy * 300 * cam.scale);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    return;
+  }
+
+  // default dot
+  ctx.fillStyle = p.ownerId === "__enemy__" ? "#ff6666" : p.color;
+  ctx.beginPath(); ctx.arc(sx, sy, size, 0, Math.PI * 2); ctx.fill();
 }
 
-function ConduitVisualizer({
-  fromNodes,
-  toNodes,
-  links
+function drawXpGem(ctx: CanvasRenderingContext2D, gem: XpGemState, cam: Camera, cw: number, ch: number): void {
+  const [sx, sy] = worldToScreen(gem.x, gem.y, cam, cw, ch);
+  const s = gem.value > 10 ? 5 : 3;
+  ctx.fillStyle = gem.value > 10 ? "#fbbf24" : "#86efac";
+  ctx.beginPath();
+  ctx.moveTo(sx, sy - s);
+  ctx.lineTo(sx + s, sy);
+  ctx.lineTo(sx, sy + s);
+  ctx.lineTo(sx - s, sy);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawBombZone(ctx: CanvasRenderingContext2D, zone: BombZoneState, cam: Camera, cw: number, ch: number, tick: number): void {
+  const [sx, sy] = worldToScreen(zone.x, zone.y, cam, cw, ch);
+  const r = zone.radius * cam.scale;
+  const pulse = Math.sin(tick * 0.1) * 0.15 + 0.85;
+
+  // outer ring
+  ctx.strokeStyle = `rgba(20,184,166,${0.4 * pulse})`;
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(sx, sy, r * pulse, 0, Math.PI * 2); ctx.stroke();
+
+  // fill
+  ctx.fillStyle = `rgba(20,184,166,${0.08 * pulse})`;
+  ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2); ctx.fill();
+
+  // progress arc
+  if (zone.progress > 0) {
+    ctx.strokeStyle = "#14b8a6";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(sx, sy, r - 6, -Math.PI / 2, -Math.PI / 2 + (zone.progress / 100) * Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // label
+  ctx.fillStyle = "#5eead4";
+  ctx.font = "bold 12px Inter, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(`BOMB ${Math.floor(zone.progress)}%`, sx, sy - 4);
+  ctx.fillStyle = "#94a3b8";
+  ctx.font = "10px Inter, sans-serif";
+  ctx.fillText(`${zone.playersInside} inside · ${Math.ceil(zone.timeLeftMs / 1000)}s`, sx, sy + 10);
+}
+
+function drawDamageNumber(ctx: CanvasRenderingContext2D, dn: DamageNumber, cam: Camera, cw: number, ch: number): void {
+  const [sx, sy] = worldToScreen(dn.x, dn.y, cam, cw, ch);
+  const fade = 1 - dn.age / 800;
+  if (fade <= 0) return;
+  ctx.globalAlpha = fade;
+  ctx.fillStyle = dn.crit ? "#fbbf24" : "#fff";
+  ctx.font = dn.crit ? "bold 16px Inter, sans-serif" : "12px Inter, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(String(dn.value), sx, sy - dn.age * 0.04);
+  ctx.globalAlpha = 1;
+}
+
+function drawMinimap(ctx: CanvasRenderingContext2D, state: GameState, myId: string, cw: number, ch: number): void {
+  const mw = 140, mh = 140, mx = cw - mw - 10, my = ch - mh - 10;
+  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  ctx.fillRect(mx, my, mw, mh);
+  ctx.strokeStyle = "rgba(56,189,248,0.3)";
+  ctx.strokeRect(mx, my, mw, mh);
+
+  const sx = mw / ARENA_W, sy2 = mh / ARENA_H;
+
+  // bomb zones
+  for (const z of state.bombZones) {
+    ctx.fillStyle = "rgba(20,184,166,0.6)";
+    ctx.beginPath(); ctx.arc(mx + z.x * sx, my + z.y * sy2, 4, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // enemies (dots)
+  ctx.fillStyle = "rgba(239,68,68,0.4)";
+  for (const e of state.enemies) {
+    if (e.rank === "boss" || e.rank === "miniboss") {
+      ctx.fillStyle = "#fbbf24";
+      ctx.beginPath(); ctx.arc(mx + e.x * sx, my + e.y * sy2, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "rgba(239,68,68,0.4)";
+    } else {
+      ctx.fillRect(mx + e.x * sx - 1, my + e.y * sy2 - 1, 2, 2);
+    }
+  }
+
+  // players
+  for (const p of state.players) {
+    if (!p.alive) continue;
+    ctx.fillStyle = p.id === myId ? "#fff" : "#38bdf8";
+    ctx.beginPath(); ctx.arc(mx + p.x * sx, my + p.y * sy2, 3, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+/* ── Starter weapon / Token display names ───────────────────────────── */
+
+const starterWeapons = WEAPONS.filter(w => w.starter);
+const allNonStarterWeapons = WEAPONS.filter(w => !w.starter);
+
+/* ═══════════════════════════════════════════════════════════════════════
+   React Components
+   ═══════════════════════════════════════════════════════════════════════ */
+
+function LobbyScreen({
+  lobby, myId, send,
 }: {
-  fromNodes: string[];
-  toNodes: string[];
-  links: Array<{ from: string; to: string }>;
+  lobby: LobbyState; myId: string;
+  send: (e: ClientEnvelope) => void;
 }): JSX.Element {
+  const me = lobby.players.find(p => p.id === myId);
+  if (!me) return <div className="screen lobby-screen"><p>Joining...</p></div>;
+
   return (
-    <svg className="conduit-svg" viewBox="0 0 280 160" role="img" aria-label="Conduit Routing Visualizer">
-      {fromNodes.map((node, index) => (
-        <g key={`f-${node}`}>
-          <circle cx="30" cy={30 + index * 34} r="10" className="node from" />
-          <text x="30" y={34 + index * 34} className="node-text">{node}</text>
-        </g>
-      ))}
-      {toNodes.map((node, index) => (
-        <g key={`t-${node}`}>
-          <circle cx="250" cy={30 + index * 34} r="10" className="node to" />
-          <text x="250" y={34 + index * 34} className="node-text">{node}</text>
-        </g>
-      ))}
-      {links.map((link) => {
-        const fromIndex = fromNodes.indexOf(link.from);
-        const toIndex = toNodes.indexOf(link.to);
-        if (fromIndex < 0 || toIndex < 0) return null;
-        return (
-          <line
-            key={`${link.from}-${link.to}`}
-            x1="40"
-            y1={30 + fromIndex * 34}
-            x2="240"
-            y2={30 + toIndex * 34}
-            className="conduit-line"
-          />
-        );
-      })}
-    </svg>
-  );
-}
+    <div className="screen lobby-screen">
+      <h1>DEFUSE.EXE</h1>
+      <p className="subtitle">Multiplayer Roguelite Survivor</p>
 
-function moduleCard(moduleState: BombSpec["modules"][number], onAction: (action: MatchAction) => void): JSX.Element {
-  if (moduleState.moduleType === "wires") {
-    const wires = moduleState.params.wires as Array<{
-      id: string;
-      color: string;
-      thickness: number;
-      label: string;
-      insulation: string;
-      conduitTag: number;
-      inspectedProperties: string[];
-      cut: boolean;
-    }>;
-    const safeOrder = moduleState.params.safeOrder as number[];
-    const cutProgress = Number(moduleState.params.cutProgress ?? 0);
-
-    return (
-      <div className="module-card wires-card">
-        <h3>Wire Lattice · {moduleState.id}</h3>
-        <p className="module-help">Cut in clue order. Conduit outputs map to wire tags.</p>
-        <div className="sequence-strip">
-          {safeOrder.map((wireIndex, index) => (
-            <span key={`${moduleState.id}-step-${index}`} className={index < cutProgress ? "step on" : "step"}>
-              {index + 1}:{wireIndex + 1}
-            </span>
-          ))}
-        </div>
-        <div className="wire-list">
-          {wires.map((wire, wireIndex) => (
-            <div key={wire.id} className="wire-row">
-              <span className="wire-color" data-wire-color={wire.color}>{wire.color.toUpperCase()}</span>
-              <span>{wire.id} · Tag {wire.conduitTag}</span>
-              <span>{wire.cut ? "CUT" : "INTACT"}</span>
-              <button onClick={() => onAction({ type: "inspect_wire", moduleId: moduleState.id, wireId: wire.id, property: "color" })}>
-                Inspect
+      <div className="lobby-grid">
+        {/* Character pick */}
+        <div className="lobby-section">
+          <h3>Character</h3>
+          <div className="option-grid">
+            {CHARACTERS.map(c => (
+              <button
+                key={c.id}
+                className={me.characterId === c.id ? "option-btn selected" : "option-btn"}
+                onClick={() => send({ type: "lobby_update", characterId: c.id })}
+              >
+                <span className="dot" style={{ background: c.color }} />
+                <strong>{c.name}</strong>
+                <small>{c.passiveDesc}</small>
+                <small>HP {c.baseHp} · SPD {c.baseSpeed}</small>
               </button>
-              <button onClick={() => onAction({ type: "cut_wire", moduleId: moduleState.id, wireId: wire.id })}>Cut</button>
-              <small>
-                Slot {wireIndex + 1} · {wire.inspectedProperties.length > 0 ? `Known: ${wire.inspectedProperties.join(",")}` : "Unknown"}
-              </small>
+            ))}
+          </div>
+        </div>
+
+        {/* Starter weapon */}
+        <div className="lobby-section">
+          <h3>Starter Weapon</h3>
+          <div className="option-grid">
+            {starterWeapons.map(w => (
+              <button
+                key={w.id}
+                className={me.starterWeaponId === w.id ? "option-btn selected" : "option-btn"}
+                onClick={() => send({ type: "lobby_update", starterWeaponId: w.id })}
+              >
+                <span className="dot" style={{ background: w.color }} />
+                <strong>{w.name}</strong>
+                <small>{w.description}</small>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Cosmetics */}
+        <div className="lobby-section">
+          <h3>Cosmetics</h3>
+          <div className="cosmetic-row">
+            <label>Color</label>
+            <div className="color-swatches">
+              {COLOR_OVERRIDES.map(c => (
+                <button
+                  key={c || "default"}
+                  className={me.cosmetic.colorOverride === c ? "swatch selected" : "swatch"}
+                  style={{ background: c || "transparent", border: !c ? "1px dashed #94a3b8" : "none" }}
+                  onClick={() => send({ type: "lobby_update", cosmetic: { ...me.cosmetic, colorOverride: c || undefined } })}
+                />
+              ))}
             </div>
-          ))}
+          </div>
+          <div className="cosmetic-row">
+            <label>Hat</label>
+            <div className="row">
+              {HATS.map(h => (
+                <button
+                  key={h}
+                  className={(me.cosmetic.hat ?? "none") === h ? "sm-btn selected" : "sm-btn"}
+                  onClick={() => send({ type: "lobby_update", cosmetic: { ...me.cosmetic, hat: h } })}
+                >{h}</button>
+              ))}
+            </div>
+          </div>
+          <div className="cosmetic-row">
+            <label>Trail</label>
+            <div className="row">
+              {TRAILS.map(t => (
+                <button
+                  key={t}
+                  className={(me.cosmetic.trail ?? "none") === t ? "sm-btn selected" : "sm-btn"}
+                  onClick={() => send({ type: "lobby_update", cosmetic: { ...me.cosmetic, trail: t } })}
+                >{t}</button>
+              ))}
+            </div>
+          </div>
         </div>
-      </div>
-    );
-  }
 
-  if (moduleState.moduleType === "dial") {
-    const value = Number(moduleState.params.value ?? 0);
-    const alphabet = String(moduleState.params.alphabet ?? "0-9");
-
-    return (
-      <div className="module-card dial-card">
-        <h3>Rotary Dial · {moduleState.id}</h3>
-        <p className="module-help">Tune then lock inside hidden safe band.</p>
-        <DialVisualizer value={value} max={alphabet === "A-F" ? 15 : 9} />
-        <div className="dial-value">{alphabet === "A-F" ? formatHex(value) : value}</div>
-        <div className="row">
-          <button onClick={() => onAction({ type: "rotate_dial", moduleId: moduleState.id, delta: -1 })}>-1</button>
-          <button onClick={() => onAction({ type: "rotate_dial", moduleId: moduleState.id, delta: 1 })}>+1</button>
-          <button onClick={() => onAction({ type: "lock_dial", moduleId: moduleState.id })}>Lock In</button>
-        </div>
-      </div>
-    );
-  }
-
-  if (moduleState.moduleType === "glyph") {
-    const glyphs = moduleState.params.glyphs as string[];
-    const progress = Number(moduleState.params.progress ?? 0);
-    const sequence = moduleState.params.sequence as number[];
-
-    return (
-      <div className="module-card glyph-card">
-        <h3>Glyph Grid · {moduleState.id}</h3>
-        <p>
-          Progress {progress}/{sequence.length}
-        </p>
-        <div className="glyph-grid">
-          {glyphs.map((glyph, index) => (
-            <button key={`${moduleState.id}-${index}`} onClick={() => onAction({ type: "press_glyph", moduleId: moduleState.id, glyphIndex: index })}>
-              {glyph}
-            </button>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  if (moduleState.moduleType === "conduit") {
-    const fromNodes = moduleState.params.fromNodes as string[];
-    const toNodes = moduleState.params.toNodes as string[];
-    const currentLinks = moduleState.params.currentLinks as Array<{ from: string; to: string }>;
-    const desiredLinks = moduleState.params.desiredLinks as Array<{ from: string; to: string }>;
-
-    return (
-      <div className="module-card conduit-card">
-        <h3>Conduit Matrix · {moduleState.id}</h3>
-        <p className="module-help">Route each source node to correct output port.</p>
-        <ConduitVisualizer fromNodes={fromNodes} toNodes={toNodes} links={currentLinks} />
-        <div className="conduit-grid">
-          {fromNodes.map((fromNode) => (
-            <div key={`${moduleState.id}-${fromNode}`} className="conduit-row">
-              <strong>{fromNode}</strong>
-              {toNodes.map((toNode) => {
-                const active = currentLinks.some((link) => link.from === fromNode && link.to === toNode);
+        {/* Blacklist */}
+        <div className="lobby-section">
+          <h3>Blacklist (won't appear in level-ups)</h3>
+          <details>
+            <summary>Weapons ({me.blacklistedWeapons.length}/{MAX_BLACKLISTED_WEAPONS})</summary>
+            <div className="bl-grid">
+              {allNonStarterWeapons.map(w => {
+                const bl = me.blacklistedWeapons.includes(w.id);
                 return (
                   <button
-                    key={`${moduleState.id}-${fromNode}-${toNode}`}
-                    className={active ? "chip active" : "chip"}
-                    onClick={() => onAction({ type: "connect_conduit", moduleId: moduleState.id, from: fromNode, to: toNode })}
-                  >
-                    {toNode}
-                  </button>
+                    key={w.id}
+                    className={bl ? "bl-btn active" : "bl-btn"}
+                    onClick={() => {
+                      const next = bl
+                        ? me.blacklistedWeapons.filter(x => x !== w.id)
+                        : me.blacklistedWeapons.length < MAX_BLACKLISTED_WEAPONS
+                          ? [...me.blacklistedWeapons, w.id]
+                          : me.blacklistedWeapons;
+                      send({ type: "lobby_update", blacklistedWeapons: next });
+                    }}
+                  >{w.name}</button>
                 );
               })}
             </div>
-          ))}
-        </div>
-        <button onClick={() => onAction({ type: "clear_conduits", moduleId: moduleState.id })}>Clear Routing</button>
-        <small className="module-hint">Target signature: {desiredLinks.map((link) => `${link.from}->${link.to}`).join(" | ")}</small>
-      </div>
-    );
-  }
-
-  if (moduleState.moduleType === "memory") {
-    const padCount = Number(moduleState.params.padCount ?? 6);
-    const sequence = moduleState.params.sequence as number[];
-    const input = moduleState.params.input as number[];
-
-    return (
-      <div className="module-card memory-card">
-        <h3>Memory Pulse · {moduleState.id}</h3>
-        <p className="module-help">Replay the pattern. Wrong input resets.</p>
-        <p>Input: {input.length}/{sequence.length}</p>
-        <div className="memory-grid">
-          {Array.from({ length: padCount }, (_, index) => (
-            <button key={`${moduleState.id}-pad-${index}`} onClick={() => onAction({ type: "press_memory", moduleId: moduleState.id, padIndex: index })}>
-              Pad {index + 1}
-            </button>
-          ))}
-        </div>
-        <button onClick={() => onAction({ type: "reset_memory", moduleId: moduleState.id })}>Reset Memory</button>
-      </div>
-    );
-  }
-
-  if (moduleState.moduleType === "switches") {
-    const states = moduleState.params.states as number[];
-    const targetMask = moduleState.params.targetMask as number[];
-
-    return (
-      <div className="module-card switch-card">
-        <h3>Switch Matrix · {moduleState.id}</h3>
-        <p className="module-help">Match current row to target row.</p>
-        <div className="switch-rows">
-          <div className="switch-row">
-            <span>Target</span>
-            {targetMask.map((target, index) => (
-              <span key={`${moduleState.id}-target-${index}`} className={target === 1 ? "switch-led on" : "switch-led"}>
-                {target}
-              </span>
-            ))}
-          </div>
-          <div className="switch-row">
-            <span>Now</span>
-            {states.map((value, index) => (
-              <button
-                key={`${moduleState.id}-state-${index}`}
-                className={value === 1 ? "switch-toggle on" : "switch-toggle"}
-                onClick={() => onAction({ type: "toggle_switch", moduleId: moduleState.id, switchIndex: index })}
-              >
-                {value}
-              </button>
-            ))}
-          </div>
+          </details>
+          <details>
+            <summary>Tokens ({me.blacklistedTokens.length}/{MAX_BLACKLISTED_TOKENS})</summary>
+            <div className="bl-grid">
+              {TOKENS.map(t => {
+                const bl = me.blacklistedTokens.includes(t.id);
+                return (
+                  <button
+                    key={t.id}
+                    className={bl ? "bl-btn active" : "bl-btn"}
+                    onClick={() => {
+                      const next = bl
+                        ? me.blacklistedTokens.filter(x => x !== t.id)
+                        : me.blacklistedTokens.length < MAX_BLACKLISTED_TOKENS
+                          ? [...me.blacklistedTokens, t.id]
+                          : me.blacklistedTokens;
+                      send({ type: "lobby_update", blacklistedTokens: next });
+                    }}
+                  >{t.icon} {t.name}</button>
+                );
+              })}
+            </div>
+          </details>
         </div>
       </div>
-    );
-  }
 
-  if (moduleState.moduleType === "reactor") {
-    const heat = Number(moduleState.params.heat ?? 50);
-    const safeMin = Number(moduleState.params.safeMin ?? 42);
-    const safeMax = Number(moduleState.params.safeMax ?? 58);
-    const stableTicks = Number(moduleState.params.stableTicks ?? 0);
-    const inSafe = heat >= safeMin && heat <= safeMax;
-
-    return (
-      <div className="module-card reactor-card">
-        <h3>Reactor Core · {moduleState.id}</h3>
-        <p className="module-help">Keep heat in green zone, stabilize 3 cycles.</p>
-        <div className="heat-bar">
-          <div className={inSafe ? "heat-fill safe" : "heat-fill"} style={{ width: `${heat}%` }} />
-        </div>
-        <p>
-          Heat {heat} · Safe {safeMin}-{safeMax} · Stability Cycles {stableTicks}/3
-        </p>
-        <div className="row">
-          <button onClick={() => onAction({ type: "adjust_reactor", moduleId: moduleState.id, delta: -5 })}>Cool -5</button>
-          <button onClick={() => onAction({ type: "adjust_reactor", moduleId: moduleState.id, delta: 5 })}>Heat +5</button>
-          <button onClick={() => onAction({ type: "stabilize_reactor", moduleId: moduleState.id })}>Stabilize</button>
+      {/* Players */}
+      <div className="lobby-section">
+        <h3>Players ({lobby.players.length})</h3>
+        <div className="player-list">
+          {lobby.players.map(p => {
+            const c = getCharacter(p.characterId);
+            const w = getWeapon(p.starterWeaponId);
+            return (
+              <div key={p.id} className="player-card">
+                <span className="dot" style={{ background: c?.color ?? "#fff" }} />
+                <span>{p.displayName}</span>
+                <small>{c?.name} · {w?.name}</small>
+                <span className={p.ready ? "ready-badge ready" : "ready-badge"}>{p.ready ? "READY" : "NOT READY"}</span>
+              </div>
+            );
+          })}
         </div>
       </div>
-    );
-  }
 
-  const polarity = String(moduleState.params.polarity ?? "POS");
-  const voltage = Number(moduleState.params.voltage ?? 0);
-  return (
-    <div className="module-card power-card">
-      <h3>Power Cell · {moduleState.id}</h3>
-      <p>Polarity: {polarity}</p>
-      <p>Voltage: {voltage}</p>
-      <div className="row">
-        <button onClick={() => onAction({ type: "swap_polarity", moduleId: moduleState.id })}>Swap Polarity</button>
-        <button onClick={() => onAction({ type: "vent_power", moduleId: moduleState.id })}>Vent (-10s)</button>
+      {/* Actions */}
+      <div className="lobby-actions">
+        <button className="big-btn" onClick={() => send({ type: "ready", ready: !me.ready })}>
+          {me.ready ? "Unready" : "Ready Up"}
+        </button>
+        {lobby.hostId === myId && (
+          <button className="big-btn accent" onClick={() => send({ type: "start_game" })}>
+            Start Game
+          </button>
+        )}
       </div>
     </div>
   );
 }
 
-export function App(): JSX.Element {
-  const [connected, setConnected] = useState(false);
-  const [session, setSession] = useState<Session | null>(null);
-  const [state, setState] = useState<PublicMatchView | null>(null);
-  const [brief, setBrief] = useState<RoleBrief | undefined>();
-  const [status, setStatus] = useState("Booting Discord activity...");
-  const [panicOpen, setPanicOpen] = useState(false);
-  const [tutorialLevel, setTutorialLevel] = useState<number>(() => getStoredTutorialLevel());
-  const [eventCue, setEventCue] = useState<"positive" | "negative" | "neutral">("neutral");
-  const socketRef = useRef<WebSocket | null>(null);
-  const prevPhaseRef = useRef<PublicMatchView["phase"] | undefined>(undefined);
-  const lastEventRef = useRef<string>("");
+/* ── HUD ────────────────────────────────────────────────────────────── */
 
-  const me = useMemo(() => {
-    if (!session || !state) return undefined;
-    return state.players.find((player) => player.userId === session.userId);
-  }, [session, state]);
-
-  const tutorialStep = useMemo(() => {
-    if (!state?.tutorialMode || !state.bomb) return undefined;
-    const moduleSolved = new Map(state.bomb.modules.map((moduleState) => [moduleState.id, moduleState.solved]));
-    if (!moduleSolved.get("t-conduit")) return "Step 1: Complete Conduit Matrix routing.";
-    if (!moduleSolved.get("t-wires")) return "Step 2: Cut wires in mapped order (watch wire tag clues).";
-    if (!moduleSolved.get("t-memory")) return "Step 3: Enter the Memory Pulse sequence.";
-    if (!moduleSolved.get("t-reactor")) return "Step 4: Hold Reactor in safe band and stabilize 3 times.";
-    return "Tutorial complete. Great work — start a full procedural match.";
-  }, [state]);
-
-  useEffect(() => {
-    localStorage.setItem(tutorialLevelKey, String(tutorialLevel));
-  }, [tutorialLevel]);
-
-  useEffect(() => {
-    if (!state || state.eventLog.length === 0) return;
-    const latest = state.eventLog[0];
-    if (!latest || latest === lastEventRef.current) return;
-    lastEventRef.current = latest;
-
-    const lower = latest.toLowerCase();
-    const isNegative =
-      lower.includes("strike") ||
-      lower.includes("penalty") ||
-      lower.includes("failed") ||
-      lower.includes("wrong") ||
-      lower.includes("lockout");
-    const isPositive = lower.includes("solved") || lower.includes("stabilized") || lower.includes("defused");
-
-    const cue: "positive" | "negative" | "neutral" = isNegative ? "negative" : isPositive ? "positive" : "neutral";
-    setEventCue(cue);
-
-    if (cue !== "neutral") {
-      const context = new AudioContext();
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      oscillator.connect(gain);
-      gain.connect(context.destination);
-      oscillator.type = cue === "positive" ? "triangle" : "square";
-      oscillator.frequency.value = cue === "positive" ? 720 : 200;
-      gain.gain.value = 0.0001;
-      oscillator.start();
-      gain.gain.exponentialRampToValueAtTime(0.06, context.currentTime + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.18);
-      oscillator.stop(context.currentTime + 0.2);
-      void oscillator.addEventListener("ended", () => {
-        void context.close();
-      });
-
-      const timeout = window.setTimeout(() => setEventCue("neutral"), 400);
-      return () => window.clearTimeout(timeout);
-    }
-  }, [state]);
-
-  useEffect(() => {
-    if (!state) return;
-    const previousPhase = prevPhaseRef.current;
-    if (previousPhase === "active" && state.phase === "results" && state.tutorialMode && state.result?.outcome === "defused") {
-      setTutorialLevel((current) => Math.min(3, current + 1));
-    }
-    prevPhaseRef.current = state.phase;
-  }, [state]);
-
-  useEffect(() => {
-    let mounted = true;
-
-    async function bootstrap(): Promise<void> {
-      const instanceId = getInstanceId();
-      localStorage.setItem("defuse-instance-id", instanceId);
-
-      const defaultSession = {
-        userId: localStorage.getItem("defuse-user-id") ?? randomId("user"),
-        displayName: localStorage.getItem("defuse-name") ?? `Player-${Math.floor(Math.random() * 999)}`,
-        instanceId
-      };
-
-      try {
-        const discordClientId = import.meta.env.VITE_DISCORD_CLIENT_ID;
-        if (discordClientId) {
-          const sdkModule: any = await import("@discord/embedded-app-sdk");
-          const sdk = new sdkModule.DiscordSDK(discordClientId);
-          await sdk.ready();
-          const auth = await sdk.commands.authorize({
-            client_id: discordClientId,
-            response_type: "code",
-            state: "defuse",
-            prompt: "none",
-            scope: ["identify"]
-          });
-
-          const exchange = await fetch(`${serverUrl}/api/auth/exchange`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ code: auth.code })
-          });
-
-          if (exchange.ok) {
-            const payload = await exchange.json();
-            defaultSession.userId = payload.user.id;
-            defaultSession.displayName = payload.user.username;
-          }
-        }
-      } catch {
-        setStatus("Running in local dev mode (Discord SDK unavailable).");
-      }
-
-      if (!mounted) return;
-      localStorage.setItem("defuse-user-id", defaultSession.userId);
-      localStorage.setItem("defuse-name", defaultSession.displayName);
-
-      const ws = new WebSocket(wsUrl);
-      socketRef.current = ws;
-      ws.onopen = () => {
-        setConnected(true);
-        setStatus("Connected.");
-        const joinPayload: ClientEnvelope = {
-          type: "join_instance",
-          instanceId: defaultSession.instanceId,
-          userId: defaultSession.userId,
-          displayName: defaultSession.displayName
-        };
-        ws.send(JSON.stringify(joinPayload));
-      };
-
-      ws.onclose = () => {
-        setConnected(false);
-        setStatus("Disconnected from server.");
-      };
-
-      ws.onmessage = (event) => {
-        const envelope = JSON.parse(String(event.data)) as ServerEnvelope;
-
-        if (envelope.type === "joined") {
-          setSession(defaultSession);
-          return;
-        }
-
-        if (envelope.type === "state_patch") {
-          setState(envelope.state);
-          setBrief(envelope.privateBrief);
-          return;
-        }
-
-        if (envelope.type === "error") {
-          setStatus(envelope.message);
-        }
-      };
-    }
-
-    void bootstrap();
-
-    return () => {
-      mounted = false;
-      socketRef.current?.close();
-    };
-  }, []);
-
-  function send(payload: ClientEnvelope): void {
-    const socket = socketRef.current;
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify(payload));
-    }
-  }
-
-  function sendAction(action: MatchAction): void {
-    send({ type: "action", action });
-  }
+function HUD({ state, myId }: { state: GameState; myId: string }): JSX.Element {
+  const me = state.players.find(p => p.id === myId);
+  const mins = Math.floor(state.timeRemainingMs / 60000);
+  const secs = Math.floor((state.timeRemainingMs % 60000) / 1000);
 
   return (
-    <div className="app">
-      <header className={`topbar cue-${eventCue}`}>
-        <div>
-          <h1>DEFUSE.EXE</h1>
-          <p>{status}</p>
+    <div className="hud-overlay">
+      <div className="hud-top">
+        <div className="hud-stat">
+          <small>Wave</small><strong>{state.wave}</strong>
         </div>
-        <div className="status-pill">{connected ? "LIVE" : "OFFLINE"}</div>
-      </header>
+        <div className="hud-stat">
+          <small>Time</small><strong>{state.postBoss ? "∞" : `${mins}:${secs.toString().padStart(2, "0")}`}</strong>
+        </div>
+        <div className="hud-stat">
+          <small>Level</small><strong>{state.sharedLevel}</strong>
+        </div>
+        <div className="hud-stat">
+          <small>Enemies</small><strong>{state.enemies.length}</strong>
+        </div>
+      </div>
 
-      <section className="hud">
-        <div className="metric">
-          <span>Instance</span>
-          <strong>{session?.instanceId ?? "-"}</strong>
-        </div>
-        <div className="metric">
-          <span>Timer</span>
-          <strong>{state ? Math.ceil(state.resources.timerMsRemaining / 1000) : "-"}s</strong>
-        </div>
-        <div className="metric">
-          <span>Comms</span>
-          <strong>{state ? Math.max(0, Math.floor(state.resources.commsSecondsRemaining)) : "-"}s</strong>
-        </div>
-        <div className="metric">
-          <span>Stability</span>
-          <strong>{state?.resources.stability ?? "-"}</strong>
-        </div>
-        <div className="metric">
-          <span>Voice</span>
-          <strong>{state?.voice.mode ?? "-"}</strong>
-        </div>
-      </section>
+      {/* XP bar */}
+      <div className="xp-bar-container">
+        <div className="xp-bar-fill" style={{ width: `${(state.sharedXp / state.xpToNext) * 100}%` }} />
+        <span className="xp-text">XP {state.sharedXp}/{state.xpToNext}</span>
+      </div>
 
-      <section className="brief-box">
-        <h2>How To Defuse (Fast)</h2>
-        <ul>
-          <li>Use Conduit Matrix to reveal wire order clues (wire tags follow conduit outputs).</li>
-          <li>Cut Wire Lattice in exact order shown by clue sequence.</li>
-          <li>Run parallel: Dial + Glyph + Memory + Switches while one player controls Reactor heat band.</li>
-          <li>Use support abilities only when your role grants that capability.</li>
-          <li>Press Panic Button to inspect penalties when a mechanic fails.</li>
-        </ul>
-      </section>
-
-      <section className="lobby-row">
-        <div>
-          <h2>Players ({state?.players.length ?? 0})</h2>
-          <ul>
-            {state?.players.map((player) => (
-              <li key={player.userId}>
-                {player.displayName} · {player.roleName} · {player.connected ? "online" : "offline"}
-              </li>
-            ))}
-          </ul>
-        </div>
-        <div className="action-stack">
-          <button onClick={() => send({ type: "start_match" })} disabled={state?.phase !== "lobby"}>
-            Start
-          </button>
-          <button onClick={() => send({ type: "start_tutorial", level: tutorialLevel })} disabled={state?.phase !== "lobby"}>
-            Start Tutorial · Stage {tutorialLevel}
-          </button>
-          <button onClick={() => send({ type: "play_again" })} disabled={state?.phase !== "results"}>
-            Play Again
-          </button>
-          <button onClick={() => send({ type: "request_scan" })}>Request Scan</button>
-          <button onClick={() => setPanicOpen((value) => !value)}>Panic Button</button>
-        </div>
-      </section>
-
-      {brief && (
-        <section className="brief-box">
-          <h2>Private Brief · {brief.roleName}</h2>
-          <p>Capabilities: {brief.capabilities.join(", ") || "None"}</p>
-          <ul>
-            {brief.privateHints.map((hint, index) => (
-              <li key={`${brief.userId}-${index}`}>{hint}</li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {state?.phase === "active" && state.bomb && (
-        <section className="modules-grid">
-          {state.bomb.modules.map((moduleState) => (
-            <div key={moduleState.id}>
-              {moduleCard(moduleState, sendAction)}
-              <button className="observer-btn" onClick={() => sendAction({ type: "observer_ping", moduleId: moduleState.id })}>
-                Observer Ping
-              </button>
-            </div>
-          ))}
-        </section>
-      )}
-
-      {tutorialStep && (
-        <section className="brief-box tutorial-box">
-          <h2>Tutorial Objective</h2>
-          <p>{tutorialStep}</p>
-          <small>Stage {tutorialLevel}/3 · Complete tutorial defuse to unlock the next stage.</small>
-        </section>
-      )}
-
-      {state?.phase === "active" && (
-        <section className="abilities">
-          <h2>Support Abilities</h2>
-          <div className="row">
-            <button onClick={() => sendAction({ type: "use_ability", ability: "time_dilation" })}>Time Dilation</button>
-            <button onClick={() => sendAction({ type: "use_ability", ability: "comms_battery" })}>Comms Battery</button>
-            <button onClick={() => sendAction({ type: "use_ability", ability: "noise_gate" })}>Noise Gate</button>
-            <button onClick={() => sendAction({ type: "use_ability", ability: "echo_cancel" })}>Echo Cancel</button>
+      {/* Player HP */}
+      {me && (
+        <div className="hud-bottom-left">
+          <div className="hp-bar-container">
+            <div className="hp-bar-fill" style={{ width: `${(me.hp / me.maxHp) * 100}%` }} />
+            <span className="hp-text">{me.hp}/{me.maxHp} HP</span>
           </div>
-        </section>
+          <div className="weapon-slots">
+            {me.weapons.map(ws => {
+              const wDef = getWeapon(ws.weaponId);
+              return (
+                <div key={ws.weaponId} className={`weapon-slot ${ws.ascended ? "ascended" : ""}`}>
+                  <span className="w-dot" style={{ background: wDef?.color ?? "#fff" }} />
+                  <span>{wDef?.name ?? ws.weaponId}</span>
+                  <small>Lv{ws.level}</small>
+                </div>
+              );
+            })}
+          </div>
+          <div className="token-slots">
+            {me.tokens.map(tid => {
+              const t = TOKENS.find(tt => tt.id === tid);
+              return (
+                <div key={tid} className="token-slot">
+                  <span>{t?.icon ?? "?"}</span>
+                  <small>{t?.name ?? tid}</small>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Level-up modal ─────────────────────────────────────────────────── */
+
+function LevelUpModal({ offer, send }: { offer: LevelUpOffer; send: (e: ClientEnvelope) => void }): JSX.Element {
+  return (
+    <div className="modal-overlay">
+      <div className="modal">
+        <h2>Level Up!</h2>
+        <p>Choose an upgrade:</p>
+        <div className="upgrade-options">
+          {offer.options.map(opt => (
+            <button
+              key={opt.id}
+              className="upgrade-card"
+              onClick={() => send({ type: "pick_upgrade", upgradeId: opt.id })}
+            >
+              <strong>{opt.name}</strong>
+              <p>{opt.description}</p>
+              {opt.group && <span className="group-badge">GROUP</span>}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Vote continue modal ────────────────────────────────────────────── */
+
+function VoteContinueModal({ state, send }: { state: GameState; send: (e: ClientEnvelope) => void }): JSX.Element {
+  return (
+    <div className="modal-overlay">
+      <div className="modal">
+        <h2>Boss Defeated!</h2>
+        <p>Keep going? Bosses will continue spawning every {5} waves.</p>
+        <p>Votes: {state.continueVotes.length}/{Math.ceil(state.players.length * 0.5)} needed</p>
+        <button className="big-btn accent" onClick={() => send({ type: "vote_continue" })}>
+          Keep Going!
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── Results screen ─────────────────────────────────────────────────── */
+
+function ResultsScreen({ result, send }: { result: GameResult; send: (e: ClientEnvelope) => void }): JSX.Element {
+  const podiumPlayers = result.podium.map(id => result.players.find(p => p.id === id)!).filter(Boolean);
+
+  return (
+    <div className="screen results-screen">
+      <h1 className={result.outcome === "victory" ? "victory-title" : "defeat-title"}>
+        {result.outcome === "victory" ? "MISSION COMPLETE" : "MISSION FAILED"}
+      </h1>
+      <p>Wave {result.wave} · {Math.floor(result.timeElapsedMs / 60000)}m {Math.floor((result.timeElapsedMs % 60000) / 1000)}s</p>
+
+      {/* Podium */}
+      {podiumPlayers.length > 0 && (
+        <div className="podium">
+          {podiumPlayers.map((p, i) => {
+            const char = getCharacter(p.characterId);
+            return (
+              <div key={p.id} className={`podium-slot rank-${i + 1}`}>
+                <div className="podium-rank">#{i + 1}</div>
+                <div className="podium-avatar" style={{ background: char?.color ?? "#38bdf8" }} />
+                <div className="podium-name">{p.displayName}</div>
+                <div className="podium-stat">{p.damageDealt.toLocaleString()} dmg</div>
+              </div>
+            );
+          })}
+        </div>
       )}
 
-      {state?.phase === "results" && (
-        <section className="results">
-          <h2>Round Result</h2>
-          <p>
-            {state.result?.outcome?.toUpperCase()} · {state.result?.reason}
-          </p>
-          <p>Archetype: {state.bomb?.archetypeId}</p>
-        </section>
-      )}
-
-      {panicOpen && (
-        <section className="panic-feed">
-          <h2>Recent Actions / Penalties</h2>
-          <ul>
-            {(state?.eventLog ?? []).map((event, index) => (
-              <li key={`${event}-${index}`}>{event}</li>
+      {/* Full breakdown */}
+      <div className="breakdown">
+        <h3>Player Breakdown</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Player</th><th>Damage</th><th>Kills</th><th>XP</th><th>Bombs</th><th>Revives</th><th>Weapons</th><th>Tokens</th>
+            </tr>
+          </thead>
+          <tbody>
+            {result.players.map(p => (
+              <tr key={p.id}>
+                <td>{p.displayName}</td>
+                <td>{p.damageDealt.toLocaleString()}</td>
+                <td>{p.killCount}</td>
+                <td>{p.xpCollected}</td>
+                <td>{p.bombsDefused}</td>
+                <td>{p.revives}</td>
+                <td>{p.weaponIds.map(id => getWeapon(id)?.name ?? id).join(", ")}</td>
+                <td>{p.tokenIds.map(id => TOKENS.find(t => t.id === id)?.icon ?? id).join(" ")}</td>
+              </tr>
             ))}
-          </ul>
-        </section>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Main App
+   ═══════════════════════════════════════════════════════════════════════ */
+
+export function App(): JSX.Element {
+  const [connected, setConnected] = useState(false);
+  const [myId, setMyId] = useState("");
+  const [lobby, setLobby] = useState<LobbyState | null>(null);
+  const [gameState, setGameState] = useState<GameState | null>(null);
+  const [levelUp, setLevelUp] = useState<LevelUpOffer | null>(null);
+  const [result, setResult] = useState<GameResult | null>(null);
+  const [bossWarning, setBossWarning] = useState<string | null>(null);
+  const [ascensionMsg, setAscensionMsg] = useState<string | null>(null);
+  const [status, setStatus] = useState("Connecting...");
+  const wsRef = useRef<WebSocket | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const animRef = useRef<number>(0);
+  const lastGameStateRef = useRef<GameState | null>(null);
+
+  const send = useCallback((env: ClientEnvelope) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(env));
+    }
+  }, []);
+
+  // WebSocket
+  useEffect(() => {
+    const name = localStorage.getItem("defuse-name") || `Player-${Math.floor(Math.random() * 9999)}`;
+    localStorage.setItem("defuse-name", name);
+
+    const ws = new WebSocket(WS_URL);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setConnected(true);
+      setStatus("Connected");
+      send({ type: "join", displayName: name } as ClientEnvelope);
+    };
+    ws.onclose = () => { setConnected(false); setStatus("Disconnected"); };
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(String(e.data)) as ServerEnvelope;
+      switch (msg.type) {
+        case "joined":
+          setMyId(msg.playerId);
+          break;
+        case "lobby":
+          setLobby(msg.lobby);
+          setGameState(null);
+          setResult(null);
+          setLevelUp(null);
+          break;
+        case "state":
+          setGameState(msg.state);
+          lastGameStateRef.current = msg.state;
+          setLobby(null);
+          setResult(null);
+          if (msg.state.phase === "vote_continue") setLevelUp(null);
+          break;
+        case "level_up":
+          setLevelUp(msg.offer);
+          break;
+        case "results":
+          setResult(msg.result);
+          setGameState(null);
+          setLevelUp(null);
+          break;
+        case "boss_warning":
+          setBossWarning(msg.bossName);
+          setTimeout(() => setBossWarning(null), 3000);
+          break;
+        case "ascension":
+          setAscensionMsg(`${msg.weaponName} → ${msg.ascendedName}!`);
+          setTimeout(() => setAscensionMsg(null), 4000);
+          break;
+        case "error":
+          setStatus(msg.message);
+          break;
+      }
+    };
+
+    return () => ws.close();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Input
+  useEffect(() => {
+    const handleDown = (e: KeyboardEvent) => keysDown.add(e.key.toLowerCase());
+    const handleUp = (e: KeyboardEvent) => keysDown.delete(e.key.toLowerCase());
+    window.addEventListener("keydown", handleDown);
+    window.addEventListener("keyup", handleUp);
+
+    const inputLoop = setInterval(() => {
+      if (!gameState || gameState.phase !== "active") return;
+      const v = inputVector();
+      send({ type: "input", dx: v.dx, dy: v.dy });
+    }, 50);
+
+    return () => {
+      window.removeEventListener("keydown", handleDown);
+      window.removeEventListener("keyup", handleUp);
+      clearInterval(inputLoop);
+    };
+  }, [gameState, send]);
+
+  // Canvas render loop
+  useEffect(() => {
+    function frame() {
+      const canvas = canvasRef.current;
+      const state = lastGameStateRef.current;
+      if (canvas && state) {
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          canvas.width = canvas.clientWidth;
+          canvas.height = canvas.clientHeight;
+          renderGame(ctx, state, myId, canvas.width, canvas.height);
+        }
+      }
+      animRef.current = requestAnimationFrame(frame);
+    }
+    animRef.current = requestAnimationFrame(frame);
+    return () => cancelAnimationFrame(animRef.current);
+  }, [myId]);
+
+  // Results screen
+  if (result) {
+    return <ResultsScreen result={result} send={send} />;
+  }
+
+  // Lobby
+  if (lobby) {
+    return <LobbyScreen lobby={lobby} myId={myId} send={send} />;
+  }
+
+  // Game
+  return (
+    <div className="game-container">
+      <canvas ref={canvasRef} className="game-canvas" />
+      {gameState && <HUD state={gameState} myId={myId} />}
+      {levelUp && <LevelUpModal offer={levelUp} send={send} />}
+      {gameState?.phase === "vote_continue" && <VoteContinueModal state={gameState} send={send} />}
+
+      {bossWarning && (
+        <div className="boss-warning">
+          <h2>⚠ {bossWarning} INCOMING ⚠</h2>
+        </div>
       )}
 
-      <footer>
-        <small>
-          {me ? `${me.displayName} · ${me.roleName}` : "Connecting..."} · speaking now: {state?.voice.speakingCount ?? 0}
-        </small>
-      </footer>
+      {ascensionMsg && (
+        <div className="ascension-banner">
+          <h2>★ ASCENSION ★</h2>
+          <p>{ascensionMsg}</p>
+        </div>
+      )}
+
+      {!connected && <div className="disconnect-overlay"><p>{status}</p></div>}
     </div>
   );
 }

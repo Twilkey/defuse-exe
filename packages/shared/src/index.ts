@@ -1,4 +1,3 @@
 export * from "./types.js";
-export * from "./config.js";
-export * from "./rng.js";
-export * from "./bomb/generator.js";
+export * from "./constants.js";
+export * from "./data.js";

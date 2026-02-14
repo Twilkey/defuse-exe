@@ -1,199 +1,326 @@
-import { z } from "zod";
+/* ─── DEFUSE.EXE — Multiplayer Roguelite Survivor — Shared Types ─── */
 
-export const moduleTypeSchema = z.enum(["wires", "dial", "glyph", "power", "conduit", "memory", "switches", "reactor"]);
-export type ModuleType = z.infer<typeof moduleTypeSchema>;
+// ── Enums / Literals ────────────────────────────────────────────────
 
-export const capabilitySchema = z.enum([
-  "wire-vision",
-  "dial-calibration",
-  "glyph-decode",
-  "stabilizer",
-  "scanner",
-  "buffer",
-  "anchor",
-  "auditor"
-]);
-export type Capability = z.infer<typeof capabilitySchema>;
+export type WeaponPattern =
+  | "projectile"
+  | "area"
+  | "orbit"
+  | "cone"
+  | "chain"
+  | "ring"
+  | "ground"
+  | "beam"
+  | "homing";
 
-export const talkModeSchema = z.enum([
-  "shared_pool",
-  "tokenized_burst",
-  "silence_windows",
-  "one_speaker_rule"
-]);
-export type TalkMode = z.infer<typeof talkModeSchema>;
+export type EnemyClass = "melee" | "ranged" | "caster";
 
-export type RoleBrief = {
-  userId: string;
-  roleName: string;
-  capabilities: Capability[];
-  privateHints: string[];
-};
+export type EnemyRank = "normal" | "elite" | "miniboss" | "boss";
 
-export type WireData = {
+export type GamePhase =
+  | "lobby"
+  | "active"
+  | "level_up"
+  | "boss_warning"
+  | "vote_continue"
+  | "results";
+
+export type UpgradeKind =
+  | "new_weapon"
+  | "weapon_level"
+  | "new_token"
+  | "player_stat"
+  | "group_stat";
+
+// ── Data Definitions ────────────────────────────────────────────────
+
+export interface CharacterDef {
   id: string;
-  color: "red" | "blue" | "yellow" | "green" | "white";
-  thickness: 1 | 2 | 3;
-  label: string;
-  insulation: "basic" | "shielded" | "frayed";
-  inspectedProperties: Array<"color" | "thickness" | "label" | "insulation">;
-  cut: boolean;
-};
-
-export type ModuleRuntimeState = {
-  id: string;
-  moduleType: ModuleType;
-  variantId: string;
-  solved: boolean;
-  lockedUntilMs?: number;
-  params: Record<string, unknown>;
-};
-
-export type RuleSpec = {
-  id: string;
+  name: string;
   description: string;
-  kind: "core" | "spice" | "deception";
-  condition: string;
-  effect: string;
-};
+  baseSpeed: number;
+  baseHp: number;
+  passive: string;
+  passiveDesc: string;
+  color: string;         // render color
+  accentColor: string;
+}
 
-export type ModifierSpec = {
+export interface WeaponDef {
   id: string;
+  name: string;
   description: string;
-};
+  pattern: WeaponPattern;
+  starter: boolean;
+  baseDamage: number;
+  baseCooldownMs: number;
+  baseArea: number;        // effect radius
+  baseProjectiles: number;
+  basePierce: number;
+  baseSpeed: number;       // projectile speed (px/tick)
+  baseDuration: number;    // effect duration ticks
+  baseKnockback: number;
+  maxLevel: number;
+  color: string;
+  ascendedId?: string;     // id of ascended form
+  matchingTokenId?: string;
+}
 
-export type BombSpec = {
-  seed: string;
-  archetypeId: string;
-  difficultyTier: number;
-  playerCount: number;
-  modules: ModuleRuntimeState[];
-  graph: Array<{ from: string; to: string }>;
-  ruleStack: RuleSpec[];
-  modifiers: ModifierSpec[];
-};
+export interface AscendedWeaponDef extends WeaponDef {
+  baseWeaponId: string;
+  requiredTokenId: string;
+  ascensionDesc: string;
+}
 
-export type MatchResources = {
-  timerMsRemaining: number;
-  commsSecondsRemaining: number;
-  stability: number;
-};
+export interface TokenDef {
+  id: string;
+  name: string;
+  description: string;
+  stat: string;
+  value: number;
+  group: boolean;        // is this a group-wide buff?
+  matchingWeaponId?: string;
+  color: string;
+  icon: string;          // emoji/symbol for display
+}
 
-export type MatchOutcome = "defused" | "exploded" | "timeout";
-export type MatchPhase = "lobby" | "active" | "results";
+export interface EnemyDef {
+  id: string;
+  name: string;
+  enemyClass: EnemyClass;
+  baseHp: number;
+  baseDamage: number;
+  baseSpeed: number;
+  xpValue: number;
+  size: number;
+  color: string;
+  shape: "circle" | "triangle" | "diamond" | "square" | "hexagon";
+  abilities?: string[];
+  spawnWeight: number;   // higher = more common
+  minWave: number;       // earliest wave to appear
+}
 
-export type MatchAction =
-  | { type: "inspect_wire"; moduleId: string; wireId: string; property: "color" | "thickness" | "label" | "insulation" }
-  | { type: "cut_wire"; moduleId: string; wireId: string }
-  | { type: "reroute_wire"; moduleId: string }
-  | { type: "connect_conduit"; moduleId: string; from: string; to: string }
-  | { type: "clear_conduits"; moduleId: string }
-  | { type: "rotate_dial"; moduleId: string; delta: number }
-  | { type: "lock_dial"; moduleId: string }
-  | { type: "press_glyph"; moduleId: string; glyphIndex: number }
-  | { type: "press_memory"; moduleId: string; padIndex: number }
-  | { type: "reset_memory"; moduleId: string }
-  | { type: "toggle_switch"; moduleId: string; switchIndex: number }
-  | { type: "swap_polarity"; moduleId: string }
-  | { type: "vent_power"; moduleId: string }
-  | { type: "adjust_reactor"; moduleId: string; delta: number }
-  | { type: "stabilize_reactor"; moduleId: string }
-  | { type: "use_ability"; ability: "time_dilation" | "comms_battery" | "noise_gate" | "echo_cancel" }
-  | { type: "observer_ping"; moduleId: string };
+export interface UpgradeDef {
+  id: string;
+  kind: UpgradeKind;
+  name: string;
+  description: string;
+  stat?: string;
+  value?: number;
+  weaponId?: string;
+  tokenId?: string;
+  group: boolean;
+}
 
-export type PlayerState = {
-  userId: string;
+export interface AscensionRecipe {
+  weaponId: string;
+  tokenId: string;
+  ascendedWeaponId: string;
+  requiredWeaponLevel: number;
+}
+
+// ── Runtime State (Server → Client) ────────────────────────────────
+
+export interface PlayerWeaponState {
+  weaponId: string;
+  level: number;
+  xp: number;
+  ascended: boolean;
+}
+
+export interface PlayerState {
+  id: string;
   displayName: string;
-  isHost: boolean;
-  connected: boolean;
-  capabilities: Capability[];
-  roleName: string;
-  joinedAtMs: number;
-  privateHints: string[];
-  stats: {
-    actions: number;
-    penalties: number;
-    supportActions: number;
-  };
-};
+  characterId: string;
+  x: number;
+  y: number;
+  hp: number;
+  maxHp: number;
+  speed: number;
+  weapons: PlayerWeaponState[];
+  tokens: string[];           // token ids
+  cosmetic: CosmeticChoice;
+  alive: boolean;
+  damageDealt: number;
+  killCount: number;
+  xpCollected: number;
+  bombsDefused: number;
+  revives: number;
+  dx: number;  // facing
+  dy: number;
+  invulnMs: number;
+  // computed stat bonuses from tokens + upgrades
+  bonusDamage: number;
+  bonusSpeed: number;
+  bonusArea: number;
+  bonusProjectiles: number;
+  bonusPierce: number;
+  bonusCrit: number;
+  bonusPickupRange: number;
+  bonusMaxHp: number;
+  bonusDamageReduction: number;
+  bonusLifesteal: number;
+  bonusAttackSpeed: number;
+  bonusXpGain: number;
+}
 
-export type VoiceState = {
-  mode: TalkMode;
-  speakingUsers: Record<string, number>;
-  overlapPenaltyArmed: boolean;
-  silenceWindowUntilMs?: number;
-  noiseGateUntilMs?: number;
-};
+export interface EnemyState {
+  id: number;
+  defId: string;
+  x: number;
+  y: number;
+  hp: number;
+  maxHp: number;
+  rank: EnemyRank;
+  targetPlayerId?: string;
+  abilityCooldowns?: Record<string, number>;
+  stunMs: number;
+}
 
-export type MatchState = {
-  instanceId: string;
-  phase: MatchPhase;
-  tutorialMode?: boolean;
-  seed: string;
-  hostUserId?: string;
-  createdAtMs: number;
-  updatedAtMs: number;
-  players: Record<string, PlayerState>;
-  bomb?: BombSpec;
-  resources: MatchResources;
-  voice: VoiceState;
-  eventLog: string[];
-  result?: {
-    outcome: MatchOutcome;
-    reason: string;
-    endedAtMs: number;
-  };
-};
+export interface ProjectileState {
+  id: number;
+  ownerId: string;
+  weaponId: string;
+  x: number;
+  y: number;
+  dx: number;
+  dy: number;
+  speed: number;
+  damage: number;
+  pierce: number;
+  pierced: number;
+  area: number;
+  lifeMs: number;
+  pattern: WeaponPattern;
+  color: string;
+  hitEnemies: number[];
+}
 
-export type PublicPlayerView = {
-  userId: string;
+export interface XpGemState {
+  id: number;
+  x: number;
+  y: number;
+  value: number;
+}
+
+export interface BombZoneState {
+  id: number;
+  x: number;
+  y: number;
+  radius: number;
+  progress: number;       // 0-100
+  playersInside: number;
+  active: boolean;
+  xpReward: number;
+  timeLeftMs: number;
+}
+
+export interface DamageNumber {
+  x: number;
+  y: number;
+  value: number;
+  crit: boolean;
+  age: number;
+}
+
+export interface CosmeticChoice {
+  colorOverride?: string;
+  hat?: string;
+  trail?: string;
+}
+
+export interface GameState {
+  phase: GamePhase;
+  tick: number;
+  timeRemainingMs: number;
+  wave: number;
+  totalWaves: number;
+  sharedXp: number;
+  sharedLevel: number;
+  xpToNext: number;
+  players: PlayerState[];
+  enemies: EnemyState[];
+  projectiles: ProjectileState[];
+  xpGems: XpGemState[];
+  bombZones: BombZoneState[];
+  damageNumbers: DamageNumber[];
+  arenaWidth: number;
+  arenaHeight: number;
+  bossActive: boolean;
+  waveEnemiesRemaining: number;
+  postBoss: boolean;         // after wave 20 boss
+  continueVotes: string[];   // player ids who voted
+  hostId: string;
+}
+
+// ── Level-up offer ──────────────────────────────────────────────────
+
+export interface LevelUpOffer {
+  playerId: string;
+  options: UpgradeDef[];
+}
+
+// ── Results ─────────────────────────────────────────────────────────
+
+export interface PlayerResult {
+  id: string;
   displayName: string;
-  isHost: boolean;
-  connected: boolean;
-  roleName: string;
-  capabilities: Capability[];
-};
+  characterId: string;
+  damageDealt: number;
+  killCount: number;
+  xpCollected: number;
+  bombsDefused: number;
+  revives: number;
+  weaponIds: string[];
+  tokenIds: string[];
+  survived: boolean;
+}
 
-export type PublicMatchView = {
-  instanceId: string;
-  phase: MatchPhase;
-  tutorialMode?: boolean;
-  seed: string;
-  resources: MatchResources;
-  voice: {
-    mode: TalkMode;
-    speakingCount: number;
-    silenceWindowUntilMs?: number;
-    noiseGateUntilMs?: number;
-  };
-  bomb?: BombSpec;
-  players: PublicPlayerView[];
-  eventLog: string[];
-  result?: MatchState["result"];
-};
+export interface GameResult {
+  outcome: "victory" | "defeat";
+  wave: number;
+  timeElapsedMs: number;
+  players: PlayerResult[];
+  podium: string[];  // top 3 player ids by damage
+}
+
+// ── Lobby ───────────────────────────────────────────────────────────
+
+export interface LobbyPlayer {
+  id: string;
+  displayName: string;
+  characterId: string;
+  starterWeaponId: string;
+  cosmetic: CosmeticChoice;
+  blacklistedWeapons: string[];
+  blacklistedTokens: string[];
+  ready: boolean;
+}
+
+export interface LobbyState {
+  hostId: string;
+  players: LobbyPlayer[];
+  countdown: number;  // -1 = not started
+}
+
+// ── Network Envelopes ───────────────────────────────────────────────
 
 export type ClientEnvelope =
-  | { type: "join_instance"; instanceId: string; userId: string; displayName: string }
-  | { type: "presence"; status: "active" | "idle" }
-  | { type: "start_match" }
-  | { type: "start_tutorial"; level?: number }
-  | { type: "play_again" }
-  | { type: "action"; action: MatchAction }
-  | { type: "request_scan" };
+  | { type: "join"; displayName: string }
+  | { type: "lobby_update"; characterId?: string; starterWeaponId?: string; cosmetic?: CosmeticChoice; blacklistedWeapons?: string[]; blacklistedTokens?: string[] }
+  | { type: "ready"; ready: boolean }
+  | { type: "start_game" }
+  | { type: "input"; dx: number; dy: number }
+  | { type: "pick_upgrade"; upgradeId: string }
+  | { type: "vote_continue" }
+  | { type: "leave" };
 
 export type ServerEnvelope =
-  | { type: "joined"; instanceId: string; userId: string }
-  | { type: "state_patch"; state: PublicMatchView; privateBrief?: RoleBrief }
+  | { type: "joined"; playerId: string }
+  | { type: "lobby"; lobby: LobbyState }
+  | { type: "state"; state: GameState }
+  | { type: "level_up"; offer: LevelUpOffer }
+  | { type: "ascension"; playerId: string; weaponName: string; ascendedName: string }
+  | { type: "boss_warning"; bossName: string }
+  | { type: "results"; result: GameResult }
   | { type: "error"; message: string };
-
-export const voiceEventSchema = z.object({
-  instanceId: z.string().min(1),
-  userId: z.string().min(1),
-  guildId: z.string().optional(),
-  channelId: z.string().optional(),
-  event: z.enum(["SPEAK_START", "SPEAK_END"]),
-  timestampMs: z.number().int().positive(),
-  sourceToken: z.string().min(1)
-});
-
-export type VoiceEvent = z.infer<typeof voiceEventSchema>;

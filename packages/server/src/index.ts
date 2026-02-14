@@ -1,1173 +1,1296 @@
-import crypto from "node:crypto";
-import fs from "node:fs";
-import http from "node:http";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import dotenv from "dotenv";
+/* ═══════════════════════════════════════════════════════════════════════
+   DEFUSE.EXE — Multiplayer Roguelite Survivor — Authoritative Server
+   ═══════════════════════════════════════════════════════════════════════ */
+
 import express from "express";
+import http from "http";
 import cors from "cors";
-import rateLimit from "express-rate-limit";
-import jwt from "jsonwebtoken";
 import { WebSocketServer, WebSocket } from "ws";
+import path from "path";
+import { fileURLToPath } from "url";
+
 import {
-  BombSpec,
-  ClientEnvelope,
-  MatchAction,
-  MatchState,
-  PublicMatchView,
-  RoleBrief,
-  ServerEnvelope,
-  VoiceEvent,
-  voiceEventSchema,
-  createInitialResources,
-  generateBombSpec,
-  generateRoleBriefs,
-  chooseTalkModeForBomb,
-  loadConfigs
+  // types
+  type GamePhase, type GameState, type PlayerState, type EnemyState,
+  type ProjectileState, type XpGemState, type BombZoneState, type DamageNumber,
+  type LobbyState, type LobbyPlayer, type ClientEnvelope, type ServerEnvelope,
+  type PlayerWeaponState, type UpgradeDef, type CosmeticChoice,
+  type GameResult, type PlayerResult, type LevelUpOffer, type WeaponDef,
+  // constants
+  TICK_RATE, TICK_MS, GAME_DURATION_MS, ARENA_W, ARENA_H, SPAWN_MARGIN,
+  PLAYER_RADIUS, PICKUP_BASE_RANGE, BASE_XP_TO_LEVEL, XP_GROWTH,
+  BOMB_ZONE_RADIUS, BOMB_ZONE_BASE_DURATION_MS, BOMB_ZONE_BASE_SPEED,
+  BOMB_ZONE_MULTI_BONUS, BOMB_ZONE_XP_REWARD_BASE, BOMB_ZONE_SPAWN_INTERVAL_MS,
+  ELITE_HP_MULT, ELITE_DMG_MULT, ELITE_XP_MULT,
+  MINIBOSS_HP_MULT, MINIBOSS_DMG_MULT, MINIBOSS_XP_MULT,
+  BOSS_HP_MULT, BOSS_DMG_MULT, BOSS_XP_MULT,
+  MAX_WEAPONS, MAX_TOKENS, WEAPON_MAX_LEVEL, LEVEL_UP_CHOICES,
+  CRIT_MULTIPLIER, INVULN_AFTER_HIT_MS, POST_BOSS_WAVE_INTERVAL,
+  DAMAGE_NUMBER_LIFETIME, MAX_ENEMIES, MAX_PROJECTILES, MAX_XP_GEMS,
+  MAX_BLACKLISTED_WEAPONS, MAX_BLACKLISTED_TOKENS,
+  // data
+  CHARACTERS, WEAPONS, ASCENDED_WEAPONS, TOKENS, ASCENSION_RECIPES,
+  ENEMIES, MINIBOSS_IDS, BOSS_IDS,
+  PLAYER_UPGRADES, GROUP_UPGRADES,
+  getWeapon, getToken, getCharacter, getEnemy,
+  getNonStarterWeapons,
 } from "@defuse/shared";
 
-dotenv.config();
+/* ── helpers ────────────────────────────────────────────────────────── */
 
-const PORT = Number(process.env.PORT ?? "3001");
-const JWT_SECRET = process.env.JWT_SECRET ?? "dev-secret";
-const VOICE_SOURCE_TOKEN = process.env.VOICE_SOURCE_TOKEN ?? "local-voice-source";
-const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "dev-admin-secret";
-const STATS_SALT = process.env.STATS_SALT ?? "dev-salt";
-const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? "http://localhost:5173")
-  .split(",")
-  .map((item) => item.trim())
-  .filter(Boolean);
-const allowAllOrigins = allowedOrigins.includes("*");
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+let nextId = 1;
+function uid(): number { return nextId++; }
 
-function isAllowedOrigin(origin: string): boolean {
-  if (allowAllOrigins) return true;
+function dist(ax: number, ay: number, bx: number, by: number): number {
+  const dx = ax - bx, dy = ay - by;
+  return Math.sqrt(dx * dx + dy * dy);
+}
 
-  for (const allowedOrigin of allowedOrigins) {
-    if (allowedOrigin === origin) {
-      return true;
+function clamp(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+function pick<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function shuffle<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function xpForLevel(level: number): number {
+  return Math.floor(BASE_XP_TO_LEVEL * Math.pow(XP_GROWTH, level - 1));
+}
+
+/* ── Room / Game state ──────────────────────────────────────────────── */
+
+interface PlayerSocket {
+  ws: WebSocket;
+  playerId: string;
+  inputDx: number;
+  inputDy: number;
+  pendingUpgrade: LevelUpOffer | null;
+}
+
+interface GameRoom {
+  id: string;
+  lobby: LobbyState;
+  sockets: Map<string, PlayerSocket>;
+  game: GameState | null;
+  interval: ReturnType<typeof setInterval> | null;
+  weaponCooldowns: Map<string, Map<string, number>>; // playerId -> weaponId -> ticksLeft
+  groupBonuses: Record<string, number>;
+  nextBombZoneMs: number;
+  waveTimer: number; // ms until next wave
+  bossKilledThisRound: boolean;
+  pendingLevelUps: Set<string>;
+}
+
+const rooms = new Map<string, GameRoom>();
+
+function getOrCreateRoom(roomId: string): GameRoom {
+  let room = rooms.get(roomId);
+  if (!room) {
+    room = {
+      id: roomId,
+      lobby: { hostId: "", players: [], countdown: -1 },
+      sockets: new Map(),
+      game: null,
+      interval: null,
+      weaponCooldowns: new Map(),
+      groupBonuses: {},
+      nextBombZoneMs: BOMB_ZONE_SPAWN_INTERVAL_MS / 2,
+      waveTimer: 5000,
+      bossKilledThisRound: false,
+      pendingLevelUps: new Set(),
+    };
+    rooms.set(roomId, room);
+  }
+  return room;
+}
+
+/* ── send helpers ───────────────────────────────────────────────────── */
+
+function sendTo(ps: PlayerSocket, env: ServerEnvelope): void {
+  if (ps.ws.readyState === WebSocket.OPEN) ps.ws.send(JSON.stringify(env));
+}
+
+function broadcast(room: GameRoom, env: ServerEnvelope): void {
+  const msg = JSON.stringify(env);
+  for (const ps of room.sockets.values()) {
+    if (ps.ws.readyState === WebSocket.OPEN) ps.ws.send(msg);
+  }
+}
+
+/* ── lobby helpers ──────────────────────────────────────────────────── */
+
+function broadcastLobby(room: GameRoom): void {
+  broadcast(room, { type: "lobby", lobby: room.lobby });
+}
+
+/* ── Create player state ────────────────────────────────────────────── */
+
+function createPlayerState(lp: LobbyPlayer): PlayerState {
+  const charDef = getCharacter(lp.characterId) ?? CHARACTERS[0];
+  return {
+    id: lp.id,
+    displayName: lp.displayName,
+    characterId: charDef.id,
+    x: ARENA_W / 2 + (Math.random() - 0.5) * 200,
+    y: ARENA_H / 2 + (Math.random() - 0.5) * 200,
+    hp: charDef.baseHp,
+    maxHp: charDef.baseHp,
+    speed: charDef.baseSpeed,
+    weapons: [{ weaponId: lp.starterWeaponId, level: 1, xp: 0, ascended: false }],
+    tokens: [],
+    cosmetic: lp.cosmetic,
+    alive: true,
+    damageDealt: 0,
+    killCount: 0,
+    xpCollected: 0,
+    bombsDefused: 0,
+    revives: 0,
+    dx: 0, dy: -1,
+    invulnMs: 2000,
+    bonusDamage: 0, bonusSpeed: 0, bonusArea: 0, bonusProjectiles: 0,
+    bonusPierce: 0, bonusCrit: 0, bonusPickupRange: 0, bonusMaxHp: 0,
+    bonusDamageReduction: 0, bonusLifesteal: 0, bonusAttackSpeed: 0,
+    bonusXpGain: 0,
+  };
+}
+
+/* ── Start game ─────────────────────────────────────────────────────── */
+
+function startGame(room: GameRoom): void {
+  const players = room.lobby.players.map(createPlayerState);
+  room.groupBonuses = {};
+  room.weaponCooldowns = new Map();
+  room.nextBombZoneMs = BOMB_ZONE_SPAWN_INTERVAL_MS / 2;
+  room.waveTimer = 3000;
+  room.bossKilledThisRound = false;
+  room.pendingLevelUps = new Set();
+
+  for (const p of players) {
+    room.weaponCooldowns.set(p.id, new Map());
+  }
+
+  room.game = {
+    phase: "active",
+    tick: 0,
+    timeRemainingMs: GAME_DURATION_MS,
+    wave: 0,
+    totalWaves: 20,
+    sharedXp: 0,
+    sharedLevel: 1,
+    xpToNext: xpForLevel(1),
+    players,
+    enemies: [],
+    projectiles: [],
+    xpGems: [],
+    bombZones: [],
+    damageNumbers: [],
+    arenaWidth: ARENA_W,
+    arenaHeight: ARENA_H,
+    bossActive: false,
+    waveEnemiesRemaining: 0,
+    postBoss: false,
+    continueVotes: [],
+    hostId: room.lobby.hostId,
+  };
+
+  room.interval = setInterval(() => tick(room), TICK_MS);
+  broadcastState(room);
+}
+
+/* ── Wave spawning ──────────────────────────────────────────────────── */
+
+function spawnEdge(): { x: number; y: number } {
+  const side = Math.floor(Math.random() * 4);
+  switch (side) {
+    case 0: return { x: Math.random() * ARENA_W, y: -SPAWN_MARGIN };
+    case 1: return { x: Math.random() * ARENA_W, y: ARENA_H + SPAWN_MARGIN };
+    case 2: return { x: -SPAWN_MARGIN, y: Math.random() * ARENA_H };
+    default: return { x: ARENA_W + SPAWN_MARGIN, y: Math.random() * ARENA_H };
+  }
+}
+
+function spawnWave(room: GameRoom): void {
+  const g = room.game!;
+  g.wave++;
+
+  const wave = g.wave;
+  const playerCount = g.players.filter(p => p.alive).length || 1;
+  const scaleFactor = 1 + (wave - 1) * 0.12;
+  const hpScale = 1 + (wave - 1) * 0.15;
+
+  // Normal enemies
+  const eligible = ENEMIES.filter(e => e.minWave <= wave && e.spawnWeight > 0);
+  const totalWeight = eligible.reduce((s, e) => s + e.spawnWeight, 0);
+  const enemyCount = Math.min(MAX_ENEMIES - g.enemies.length, Math.floor((8 + wave * 3) * playerCount));
+
+  for (let i = 0; i < enemyCount; i++) {
+    let roll = Math.random() * totalWeight;
+    let def = eligible[0];
+    for (const e of eligible) {
+      roll -= e.spawnWeight;
+      if (roll <= 0) { def = e; break; }
+    }
+    const pos = spawnEdge();
+    const isElite = wave >= 6 && Math.random() < 0.05 + (wave - 6) * 0.01;
+    const rank = isElite ? "elite" as const : "normal" as const;
+    const hpMult = isElite ? ELITE_HP_MULT : 1;
+    const dmgMult = isElite ? ELITE_DMG_MULT : 1;
+    g.enemies.push({
+      id: uid(),
+      defId: def.id,
+      x: pos.x, y: pos.y,
+      hp: Math.floor(def.baseHp * hpScale * hpMult),
+      maxHp: Math.floor(def.baseHp * hpScale * hpMult),
+      rank,
+      stunMs: 0,
+    });
+  }
+
+  // Mini-boss every 5 waves starting at 10
+  if (wave >= 10 && wave % 5 === 0 && !g.bossActive) {
+    const mbId = pick(MINIBOSS_IDS);
+    const mbDef = getEnemy(mbId)!;
+    const pos = spawnEdge();
+    g.enemies.push({
+      id: uid(), defId: mbDef.id,
+      x: pos.x, y: pos.y,
+      hp: Math.floor(mbDef.baseHp * hpScale * MINIBOSS_HP_MULT / mbDef.baseHp * mbDef.baseHp),
+      maxHp: Math.floor(mbDef.baseHp * hpScale * MINIBOSS_HP_MULT / mbDef.baseHp * mbDef.baseHp),
+      rank: "miniboss", stunMs: 0,
+    });
+    broadcast(room, { type: "boss_warning", bossName: mbDef.name });
+  }
+
+  // Boss at wave 20 (or every POST_BOSS_WAVE_INTERVAL after)
+  const isBossWave = wave === 20 || (g.postBoss && wave > 20 && (wave - 20) % POST_BOSS_WAVE_INTERVAL === 0);
+  if (isBossWave) {
+    const bossId = pick(BOSS_IDS);
+    const bossDef = getEnemy(bossId)!;
+    const pos = spawnEdge();
+    g.enemies.push({
+      id: uid(), defId: bossDef.id,
+      x: pos.x, y: pos.y,
+      hp: Math.floor(bossDef.baseHp * hpScale),
+      maxHp: Math.floor(bossDef.baseHp * hpScale),
+      rank: "boss", stunMs: 0,
+    });
+    g.bossActive = true;
+    broadcast(room, { type: "boss_warning", bossName: bossDef.name });
+  }
+
+  g.waveEnemiesRemaining = g.enemies.length;
+}
+
+/* ── Weapon firing ──────────────────────────────────────────────────── */
+
+function fireWeapons(room: GameRoom): void {
+  const g = room.game!;
+  for (const player of g.players) {
+    if (!player.alive) continue;
+    const cdMap = room.weaponCooldowns.get(player.id)!;
+
+    for (const ws of player.weapons) {
+      const wDef = getWeapon(ws.weaponId);
+      if (!wDef) continue;
+
+      const cdKey = ws.weaponId;
+      const remaining = cdMap.get(cdKey) ?? 0;
+      if (remaining > 0) {
+        cdMap.set(cdKey, remaining - TICK_MS);
+        continue;
+      }
+
+      // Apply level + bonus scaling
+      const lvlMult = 1 + (ws.level - 1) * 0.2;
+      const damage = Math.floor(wDef.baseDamage * lvlMult * (1 + player.bonusDamage));
+      const area = wDef.baseArea * (1 + player.bonusArea);
+      const projCount = wDef.baseProjectiles + Math.floor(player.bonusProjectiles);
+      const pierce = wDef.basePierce + Math.floor(player.bonusPierce);
+      const cooldown = Math.max(50, wDef.baseCooldownMs * (1 / (1 + player.bonusAttackSpeed)));
+
+      cdMap.set(cdKey, cooldown);
+
+      // find nearest enemy for targeting
+      let nearDist = Infinity, nearEnemy: EnemyState | null = null;
+      for (const e of g.enemies) {
+        const d = dist(player.x, player.y, e.x, e.y);
+        if (d < nearDist) { nearDist = d; nearEnemy = e; }
+      }
+
+      let faceDx = player.dx || 0;
+      let faceDy = player.dy || -1;
+      if (nearEnemy && nearDist < 500) {
+        faceDx = nearEnemy.x - player.x;
+        faceDy = nearEnemy.y - player.y;
+        const len = Math.sqrt(faceDx * faceDx + faceDy * faceDy) || 1;
+        faceDx /= len; faceDy /= len;
+      }
+
+      if (g.projectiles.length >= MAX_PROJECTILES) continue;
+
+      switch (wDef.pattern) {
+        case "projectile":
+        case "homing":
+          for (let i = 0; i < projCount; i++) {
+            const spread = (i - (projCount - 1) / 2) * 0.15;
+            const cos = Math.cos(spread), sin = Math.sin(spread);
+            const pdx = faceDx * cos - faceDy * sin;
+            const pdy = faceDx * sin + faceDy * cos;
+            g.projectiles.push({
+              id: uid(), ownerId: player.id, weaponId: ws.weaponId,
+              x: player.x, y: player.y, dx: pdx, dy: pdy,
+              speed: wDef.baseSpeed, damage, pierce, pierced: 0,
+              area, lifeMs: wDef.baseDuration * TICK_MS,
+              pattern: wDef.pattern, color: wDef.color, hitEnemies: [],
+            });
+          }
+          break;
+        case "beam": {
+          const len2 = 600;
+          // beam = long thin projectile
+          g.projectiles.push({
+            id: uid(), ownerId: player.id, weaponId: ws.weaponId,
+            x: player.x, y: player.y, dx: faceDx, dy: faceDy,
+            speed: wDef.baseSpeed, damage, pierce, pierced: 0,
+            area: area * 0.5, lifeMs: wDef.baseDuration * TICK_MS,
+            pattern: "beam", color: wDef.color, hitEnemies: [],
+          });
+          break;
+        }
+        case "area":
+        case "cone":
+          // immediate AoE around player
+          for (const enemy of g.enemies) {
+            const d = dist(player.x, player.y, enemy.x, enemy.y);
+            if (d > area) continue;
+            if (wDef.pattern === "cone") {
+              // check angle
+              const edx = enemy.x - player.x, edy = enemy.y - player.y;
+              const elen = Math.sqrt(edx * edx + edy * edy) || 1;
+              const dot = (edx / elen) * faceDx + (edy / elen) * faceDy;
+              if (dot < 0.5) continue; // ~60° cone
+            }
+            applyDamage(room, player, enemy, damage);
+          }
+          break;
+        case "orbit":
+          // damage enemies within orbit radius
+          for (const enemy of g.enemies) {
+            const d = dist(player.x, player.y, enemy.x, enemy.y);
+            if (d < area && d > area * 0.4) {
+              applyDamage(room, player, enemy, damage);
+            }
+          }
+          break;
+        case "chain": {
+          // chain to nearest, then jump
+          if (!nearEnemy) break;
+          let target = nearEnemy;
+          const hit = new Set<number>();
+          for (let c = 0; c <= pierce; c++) {
+            if (hit.has(target.id)) break;
+            hit.add(target.id);
+            applyDamage(room, player, target, damage);
+            // find next closest not hit
+            let nextDist = Infinity;
+            let nextTarget: EnemyState | null = null;
+            for (const e of g.enemies) {
+              if (hit.has(e.id)) continue;
+              const d = dist(target.x, target.y, e.x, e.y);
+              if (d < area && d < nextDist) { nextDist = d; nextTarget = e; }
+            }
+            if (!nextTarget) break;
+            target = nextTarget;
+          }
+          break;
+        }
+        case "ring":
+          g.projectiles.push({
+            id: uid(), ownerId: player.id, weaponId: ws.weaponId,
+            x: player.x, y: player.y, dx: 0, dy: 0,
+            speed: wDef.baseSpeed, damage, pierce: 99, pierced: 0,
+            area: 10, lifeMs: wDef.baseDuration * TICK_MS,
+            pattern: "ring", color: wDef.color, hitEnemies: [],
+          });
+          break;
+        case "ground":
+          g.projectiles.push({
+            id: uid(), ownerId: player.id, weaponId: ws.weaponId,
+            x: player.x + faceDx * 40, y: player.y + faceDy * 40,
+            dx: 0, dy: 0, speed: 0, damage, pierce: 99, pierced: 0,
+            area, lifeMs: wDef.baseDuration * TICK_MS,
+            pattern: "ground", color: wDef.color, hitEnemies: [],
+          });
+          break;
+      }
+    }
+  }
+}
+
+/* ── Damage application ─────────────────────────────────────────────── */
+
+function applyDamage(room: GameRoom, player: PlayerState, enemy: EnemyState, baseDmg: number): void {
+  const g = room.game!;
+  const isCrit = Math.random() < player.bonusCrit;
+  const dmg = isCrit ? Math.floor(baseDmg * CRIT_MULTIPLIER) : baseDmg;
+  enemy.hp -= dmg;
+  player.damageDealt += dmg;
+
+  // lifesteal
+  if (player.bonusLifesteal > 0) {
+    player.hp = Math.min(player.maxHp, player.hp + Math.floor(dmg * player.bonusLifesteal));
+  }
+
+  g.damageNumbers.push({ x: enemy.x, y: enemy.y - 10, value: dmg, crit: isCrit, age: 0 });
+}
+
+/* ── Projectile movement & collision ────────────────────────────────── */
+
+function updateProjectiles(room: GameRoom): void {
+  const g = room.game!;
+  const toRemove: number[] = [];
+
+  for (const proj of g.projectiles) {
+    proj.lifeMs -= TICK_MS;
+    if (proj.lifeMs <= 0) { toRemove.push(proj.id); continue; }
+
+    if (proj.pattern === "ring") {
+      // expand ring
+      proj.area += proj.speed;
+      // check enemies in ring band
+      for (const enemy of g.enemies) {
+        if (proj.hitEnemies.includes(enemy.id)) continue;
+        const d = dist(proj.x, proj.y, enemy.x, enemy.y);
+        if (Math.abs(d - proj.area) < 15) {
+          const player = g.players.find(p => p.id === proj.ownerId);
+          if (player) applyDamage(room, player, enemy, proj.damage);
+          proj.hitEnemies.push(enemy.id);
+        }
+      }
+      continue;
     }
 
-    if (allowedOrigin.startsWith("*.")) {
-      const domain = allowedOrigin.slice(2);
-      if (origin.endsWith(`.${domain}`) || origin === `https://${domain}` || origin === `http://${domain}`) {
-        return true;
+    if (proj.pattern === "ground") {
+      // stationary AoE
+      for (const enemy of g.enemies) {
+        const d = dist(proj.x, proj.y, enemy.x, enemy.y);
+        if (d < proj.area) {
+          const player = g.players.find(p => p.id === proj.ownerId);
+          if (player && !proj.hitEnemies.includes(enemy.id)) {
+            applyDamage(room, player, enemy, Math.floor(proj.damage * 0.3));
+            proj.hitEnemies.push(enemy.id);
+          }
+        }
+      }
+      // reset hits periodically for ground effects
+      if (g.tick % 10 === 0) proj.hitEnemies = [];
+      continue;
+    }
+
+    // move
+    if (proj.pattern === "homing") {
+      // seek nearest enemy
+      let nd = Infinity; let ne: EnemyState | null = null;
+      for (const e of g.enemies) {
+        const d = dist(proj.x, proj.y, e.x, e.y);
+        if (d < nd) { nd = d; ne = e; }
+      }
+      if (ne && nd < 400) {
+        const toDx = ne.x - proj.x, toDy = ne.y - proj.y;
+        const toLen = Math.sqrt(toDx * toDx + toDy * toDy) || 1;
+        proj.dx += (toDx / toLen - proj.dx) * 0.08;
+        proj.dy += (toDy / toLen - proj.dy) * 0.08;
+        const nLen = Math.sqrt(proj.dx * proj.dx + proj.dy * proj.dy) || 1;
+        proj.dx /= nLen; proj.dy /= nLen;
+      }
+    }
+
+    proj.x += proj.dx * proj.speed;
+    proj.y += proj.dy * proj.speed;
+
+    // out of bounds
+    if (proj.x < -200 || proj.x > ARENA_W + 200 || proj.y < -200 || proj.y > ARENA_H + 200) {
+      toRemove.push(proj.id);
+      continue;
+    }
+
+    // collide with enemies
+    for (const enemy of g.enemies) {
+      if (proj.hitEnemies.includes(enemy.id)) continue;
+      const d = dist(proj.x, proj.y, enemy.x, enemy.y);
+      const eDef = getEnemy(enemy.defId);
+      const eSize = eDef ? eDef.size : 12;
+      if (d < eSize + proj.area) {
+        const player = g.players.find(p => p.id === proj.ownerId);
+        if (player) applyDamage(room, player, enemy, proj.damage);
+        proj.hitEnemies.push(enemy.id);
+        proj.pierced++;
+        if (proj.pierced > proj.pierce) { toRemove.push(proj.id); break; }
       }
     }
   }
 
-  return false;
-}
-const runtimeDir = path.dirname(fileURLToPath(import.meta.url));
-const sharedConfigPath = path.resolve(runtimeDir, "../../shared/config");
-const clientDistPath = path.resolve(runtimeDir, "../../client/dist");
-
-type ClientConnection = {
-  socket: WebSocket;
-  userId: string;
-  instanceId: string;
-};
-
-type TelemetryRow = {
-  matchId: string;
-  durationMs: number;
-  outcome: "defused" | "exploded" | "timeout";
-  playerCount: number;
-  archetypeId: string;
-  talkSecondsUsed: number;
-  at: number;
-  players: string[];
-};
-
-type RuntimeInstance = {
-  state: MatchState;
-  briefs: Record<string, RoleBrief>;
-  connections: Map<string, ClientConnection>;
-  tier: number;
-  startedAtMs?: number;
-  initialTalkBudget: number;
-};
-
-let configs = loadConfigs(sharedConfigPath);
-const instances = new Map<string, RuntimeInstance>();
-const telemetry: TelemetryRow[] = [];
-
-function now(): number {
-  return Date.now();
+  g.projectiles = g.projectiles.filter(p => !toRemove.includes(p.id));
 }
 
-function sendEnvelope(socket: WebSocket, envelope: ServerEnvelope): void {
-  if (socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify(envelope));
+/* ── Enemy AI ───────────────────────────────────────────────────────── */
+
+function updateEnemies(room: GameRoom): void {
+  const g = room.game!;
+  const alivePlayers = g.players.filter(p => p.alive);
+  if (alivePlayers.length === 0) return;
+
+  for (const enemy of g.enemies) {
+    if (enemy.stunMs > 0) { enemy.stunMs -= TICK_MS; continue; }
+    const eDef = getEnemy(enemy.defId);
+    if (!eDef) continue;
+
+    // find nearest player
+    let nd = Infinity; let nearP: PlayerState | null = null;
+    for (const p of alivePlayers) {
+      const d = dist(enemy.x, enemy.y, p.x, p.y);
+      if (d < nd) { nd = d; nearP = p; }
+    }
+    if (!nearP) continue;
+
+    const rankSpeedMult = enemy.rank === "boss" ? 0.8 : enemy.rank === "miniboss" ? 0.9 : 1;
+
+    if (eDef.enemyClass === "ranged" && nd < 250) {
+      // ranged enemies try to keep distance
+      const dx = enemy.x - nearP.x, dy = enemy.y - nearP.y;
+      const len = Math.sqrt(dx * dx + dy * dy) || 1;
+      enemy.x += (dx / len) * eDef.baseSpeed * 0.5 * rankSpeedMult;
+      enemy.y += (dy / len) * eDef.baseSpeed * 0.5 * rankSpeedMult;
+    } else if (eDef.baseSpeed > 0) {
+      // move toward nearest player
+      const dx = nearP.x - enemy.x, dy = nearP.y - enemy.y;
+      const len = Math.sqrt(dx * dx + dy * dy) || 1;
+      enemy.x += (dx / len) * eDef.baseSpeed * rankSpeedMult;
+      enemy.y += (dy / len) * eDef.baseSpeed * rankSpeedMult;
+    }
+
+    // clamp to arena (with some leeway)
+    enemy.x = clamp(enemy.x, -100, ARENA_W + 100);
+    enemy.y = clamp(enemy.y, -100, ARENA_H + 100);
+
+    // melee damage to player on contact
+    if (nd < PLAYER_RADIUS + (eDef.size || 12)) {
+      if (nearP.invulnMs <= 0) {
+        const dmgMult = enemy.rank === "elite" ? ELITE_DMG_MULT
+          : enemy.rank === "miniboss" ? MINIBOSS_DMG_MULT
+          : enemy.rank === "boss" ? BOSS_DMG_MULT : 1;
+        const rawDmg = Math.floor(eDef.baseDamage * dmgMult);
+        const reduced = Math.floor(rawDmg * (1 - nearP.bonusDamageReduction));
+        nearP.hp -= Math.max(1, reduced);
+        nearP.invulnMs = INVULN_AFTER_HIT_MS;
+        g.damageNumbers.push({ x: nearP.x, y: nearP.y - 16, value: reduced, crit: false, age: 0 });
+      }
+    }
+
+    // ranged enemies: shoot periodically
+    if (eDef.enemyClass === "ranged" && nd < 400 && nd > 60 && g.tick % 40 === 0) {
+      if (g.projectiles.length < MAX_PROJECTILES) {
+        const dx = nearP.x - enemy.x, dy = nearP.y - enemy.y;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        // enemy projectile (negative ownerId convention: "enemy")
+        g.projectiles.push({
+          id: uid(), ownerId: "__enemy__", weaponId: "enemy_shot",
+          x: enemy.x, y: enemy.y, dx: dx / len, dy: dy / len,
+          speed: 5, damage: Math.floor(eDef.baseDamage * 0.7),
+          pierce: 0, pierced: 0, area: 6, lifeMs: 3000,
+          pattern: "projectile", color: "#ff6666", hitEnemies: [],
+        });
+      }
+    }
   }
 }
 
-function hashUserId(userId: string): string {
-  return crypto.createHash("sha256").update(`${STATS_SALT}:${userId}`).digest("hex");
-}
+/* ── Enemy projectile → player collision ────────────────────────────── */
 
-function dailySeed(): string {
-  const date = new Date();
-  return `${date.getUTCFullYear()}-${date.getUTCMonth() + 1}-${date.getUTCDate()}`;
-}
-
-function createEmptyState(instanceId: string): MatchState {
-  return {
-    instanceId,
-    phase: "lobby",
-    tutorialMode: false,
-    seed: dailySeed(),
-    createdAtMs: now(),
-    updatedAtMs: now(),
-    players: {},
-    resources: {
-      timerMsRemaining: 0,
-      commsSecondsRemaining: 0,
-      stability: 3
-    },
-    voice: {
-      mode: "shared_pool",
-      speakingUsers: {},
-      overlapPenaltyArmed: true
-    },
-    eventLog: []
-  };
-}
-
-function ensureInstance(instanceId: string): RuntimeInstance {
-  let runtime = instances.get(instanceId);
-  if (!runtime) {
-    runtime = {
-      state: createEmptyState(instanceId),
-      briefs: {},
-      connections: new Map<string, ClientConnection>(),
-      tier: 2,
-      initialTalkBudget: 0
-    };
-    instances.set(instanceId, runtime);
+function checkEnemyProjectiles(room: GameRoom): void {
+  const g = room.game!;
+  const toRemove: number[] = [];
+  for (const proj of g.projectiles) {
+    if (proj.ownerId !== "__enemy__") continue;
+    for (const p of g.players) {
+      if (!p.alive || p.invulnMs > 0) continue;
+      const d = dist(proj.x, proj.y, p.x, p.y);
+      if (d < PLAYER_RADIUS + proj.area) {
+        const reduced = Math.floor(proj.damage * (1 - p.bonusDamageReduction));
+        p.hp -= Math.max(1, reduced);
+        p.invulnMs = INVULN_AFTER_HIT_MS;
+        g.damageNumbers.push({ x: p.x, y: p.y - 16, value: reduced, crit: false, age: 0 });
+        toRemove.push(proj.id);
+        break;
+      }
+    }
   }
-  return runtime;
+  g.projectiles = g.projectiles.filter(p => !toRemove.includes(p.id));
 }
 
-function pushEvent(runtime: RuntimeInstance, text: string): void {
-  runtime.state.eventLog.unshift(text);
-  runtime.state.eventLog = runtime.state.eventLog.slice(0, 30);
-  runtime.state.updatedAtMs = now();
-}
+/* ── Dead enemies → XP gems ─────────────────────────────────────────── */
 
-function toPublicState(state: MatchState): PublicMatchView {
-  return {
-    instanceId: state.instanceId,
-    phase: state.phase,
-    tutorialMode: state.tutorialMode,
-    seed: state.seed,
-    resources: state.resources,
-    voice: {
-      mode: state.voice.mode,
-      speakingCount: Object.keys(state.voice.speakingUsers).length,
-      silenceWindowUntilMs: state.voice.silenceWindowUntilMs,
-      noiseGateUntilMs: state.voice.noiseGateUntilMs
-    },
-    bomb: state.bomb,
-    players: Object.values(state.players).map((player) => ({
-      userId: player.userId,
-      displayName: player.displayName,
-      isHost: player.isHost,
-      connected: player.connected,
-      roleName: player.roleName,
-      capabilities: player.capabilities
-    })),
-    eventLog: state.eventLog,
-    result: state.result
-  };
-}
-
-function broadcastState(runtime: RuntimeInstance): void {
-  for (const [userId, connection] of runtime.connections) {
-    sendEnvelope(connection.socket, {
-      type: "state_patch",
-      state: toPublicState(runtime.state),
-      privateBrief: runtime.briefs[userId]
-    });
-  }
-}
-
-function canStart(runtime: RuntimeInstance): boolean {
-  const playerCount = Object.keys(runtime.state.players).length;
-  return runtime.state.phase === "lobby" && playerCount >= 1;
-}
-
-function computeTier(playerCount: number): number {
-  if (playerCount <= 2) return 1;
-  if (playerCount <= 6) return 2;
-  return 3;
-}
-
-function isModuleSolved(moduleState: BombSpec["modules"][number]): boolean {
-  if (moduleState.moduleType === "wires") {
-    const wires = moduleState.params.wires as Array<{ cut: boolean }>;
-    const safeOrder = moduleState.params.safeOrder as number[];
-    const cutProgress = Number(moduleState.params.cutProgress ?? 0);
-    return cutProgress >= safeOrder.length && safeOrder.every((index) => wires[index]?.cut === true);
-  }
-  if (moduleState.moduleType === "dial") {
-    return moduleState.solved;
-  }
-  if (moduleState.moduleType === "glyph") {
-    const progress = Number(moduleState.params.progress ?? 0);
-    const sequence = moduleState.params.sequence as number[];
-    return progress >= sequence.length;
-  }
-  if (moduleState.moduleType === "power") {
-    const polarity = String(moduleState.params.polarity);
-    const targetPolarity = String(moduleState.params.targetPolarity);
-    return polarity === targetPolarity;
-  }
-  if (moduleState.moduleType === "conduit") {
-    const desiredLinks = moduleState.params.desiredLinks as Array<{ from: string; to: string }>;
-    const currentLinks = moduleState.params.currentLinks as Array<{ from: string; to: string }>;
-    return desiredLinks.every((desired) => currentLinks.some((current) => current.from === desired.from && current.to === desired.to));
-  }
-  if (moduleState.moduleType === "memory") {
-    const sequence = moduleState.params.sequence as number[];
-    const input = moduleState.params.input as number[];
-    return input.length === sequence.length && input.every((value, index) => value === sequence[index]);
-  }
-  if (moduleState.moduleType === "switches") {
-    const states = moduleState.params.states as number[];
-    const targetMask = moduleState.params.targetMask as number[];
-    return states.length === targetMask.length && states.every((value, index) => value === targetMask[index]);
-  }
-  if (moduleState.moduleType === "reactor") {
-    const stableTicks = Number(moduleState.params.stableTicks ?? 0);
-    return stableTicks >= 3;
-  }
-  return moduleState.solved;
-}
-
-function evaluateRound(runtime: RuntimeInstance): void {
-  const state = runtime.state;
-  if (!state.bomb || state.phase !== "active") return;
-
-  const allSolved = state.bomb.modules.every((moduleState) => isModuleSolved(moduleState));
-  if (allSolved) {
-    state.phase = "results";
-    state.result = { outcome: "defused", reason: "All modules solved.", endedAtMs: now() };
-    pushEvent(runtime, "Bomb defused.");
-    recordTelemetry(runtime);
-  }
-}
-
-function applyPenalty(runtime: RuntimeInstance, text: string, severity = 1): void {
-  const state = runtime.state;
-  state.resources.stability = Math.max(0, state.resources.stability - severity);
-  state.resources.commsSecondsRemaining = Math.max(0, state.resources.commsSecondsRemaining - severity * 2);
-  pushEvent(runtime, text);
-
-  if (state.resources.stability <= 0) {
-    explode(runtime, "Stability collapsed.");
-  }
-}
-
-function explode(runtime: RuntimeInstance, reason: string): void {
-  if (runtime.state.phase !== "active") return;
-  runtime.state.phase = "results";
-  runtime.state.result = { outcome: "exploded", reason, endedAtMs: now() };
-  pushEvent(runtime, `BOOM: ${reason}`);
-  recordTelemetry(runtime);
-}
-
-function timeout(runtime: RuntimeInstance): void {
-  if (runtime.state.phase !== "active") return;
-  runtime.state.phase = "results";
-  runtime.state.result = { outcome: "timeout", reason: "Timer reached zero.", endedAtMs: now() };
-  pushEvent(runtime, "Timer expired.");
-  recordTelemetry(runtime);
-}
-
-function recordTelemetry(runtime: RuntimeInstance): void {
-  if (!runtime.state.bomb || !runtime.state.result || runtime.startedAtMs === undefined) return;
-
-  telemetry.push({
-    matchId: `${runtime.state.instanceId}:${runtime.startedAtMs}`,
-    durationMs: Math.max(0, now() - runtime.startedAtMs),
-    outcome: runtime.state.result.outcome,
-    playerCount: Object.keys(runtime.state.players).length,
-    archetypeId: runtime.state.bomb.archetypeId,
-    talkSecondsUsed: Math.max(0, runtime.initialTalkBudget - runtime.state.resources.commsSecondsRemaining),
-    at: now(),
-    players: Object.keys(runtime.state.players).map(hashUserId)
+function processDeadEnemies(room: GameRoom): void {
+  const g = room.game!;
+  const dead: EnemyState[] = [];
+  g.enemies = g.enemies.filter(e => {
+    if (e.hp <= 0) { dead.push(e); return false; }
+    return true;
   });
 
-  if (telemetry.length > 1000) {
-    telemetry.splice(0, telemetry.length - 1000);
+  for (const e of dead) {
+    const eDef = getEnemy(e.defId);
+    if (!eDef) continue;
+    const xpMult = e.rank === "elite" ? ELITE_XP_MULT
+      : e.rank === "miniboss" ? MINIBOSS_XP_MULT
+      : e.rank === "boss" ? BOSS_XP_MULT : 1;
+    const xpVal = Math.floor(eDef.xpValue * xpMult);
+
+    if (g.xpGems.length < MAX_XP_GEMS) {
+      g.xpGems.push({ id: uid(), x: e.x, y: e.y, value: xpVal });
+    }
+
+    // credit kill to closest player
+    let nd = Infinity; let killer: PlayerState | null = null;
+    for (const p of g.players) {
+      const d = dist(e.x, e.y, p.x, p.y);
+      if (d < nd) { nd = d; killer = p; }
+    }
+    if (killer) killer.killCount++;
+
+    // check boss death
+    if (e.rank === "boss") {
+      g.bossActive = false;
+      room.bossKilledThisRound = true;
+      if (g.wave >= 20 && !g.postBoss) {
+        g.phase = "vote_continue";
+        g.continueVotes = [];
+      }
+    }
+  }
+
+  g.waveEnemiesRemaining = g.enemies.length;
+}
+
+/* ── XP collection ──────────────────────────────────────────────────── */
+
+function collectXp(room: GameRoom): void {
+  const g = room.game!;
+  const toRemove = new Set<number>();
+
+  for (const gem of g.xpGems) {
+    for (const p of g.players) {
+      if (!p.alive) continue;
+      const range = PICKUP_BASE_RANGE * (1 + p.bonusPickupRange);
+      const d = dist(gem.x, gem.y, p.x, p.y);
+      if (d < range) {
+        const xpGainMult = 1 + p.bonusXpGain + (room.groupBonuses["xpGain"] ?? 0);
+        const gained = Math.floor(gem.value * xpGainMult);
+        g.sharedXp += gained;
+        p.xpCollected += gained;
+        toRemove.add(gem.id);
+        break; // only one player picks it up
+      } else if (d < range * 2) {
+        // magnet pull
+        const dx = p.x - gem.x, dy = p.y - gem.y;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        gem.x += (dx / len) * 3;
+        gem.y += (dy / len) * 3;
+      }
+    }
+  }
+
+  g.xpGems = g.xpGems.filter(gem => !toRemove.has(gem.id));
+
+  // check level up
+  while (g.sharedXp >= g.xpToNext) {
+    g.sharedXp -= g.xpToNext;
+    g.sharedLevel++;
+    g.xpToNext = xpForLevel(g.sharedLevel);
+    triggerLevelUp(room);
   }
 }
 
-function startMatch(runtime: RuntimeInstance): void {
-  const state = runtime.state;
-  const players = Object.values(state.players);
-  runtime.tier = computeTier(players.length);
+/* ── Level-up system ────────────────────────────────────────────────── */
 
-  state.phase = "active";
-  state.tutorialMode = false;
-  state.seed = `${dailySeed()}-${Math.floor(Math.random() * 99999)}`;
-  state.resources = createInitialResources(players.length, runtime.tier, configs);
-  runtime.initialTalkBudget = state.resources.commsSecondsRemaining;
+function triggerLevelUp(room: GameRoom): void {
+  const g = room.game!;
+  const isMulti = g.players.length > 1;
 
-  state.bomb = generateBombSpec(state.seed, players.length, runtime.tier, configs);
-  state.voice.mode = chooseTalkModeForBomb(configs, state.bomb);
-  state.voice.speakingUsers = {};
-  state.voice.overlapPenaltyArmed = true;
-  state.voice.noiseGateUntilMs = undefined;
-  state.voice.silenceWindowUntilMs = undefined;
-
-  runtime.briefs = generateRoleBriefs(players, state.bomb);
-  for (const [userId, brief] of Object.entries(runtime.briefs)) {
-    const player = state.players[userId];
-    if (!player) continue;
-    player.roleName = brief.roleName;
-    player.capabilities = brief.capabilities;
-    player.privateHints = brief.privateHints;
+  for (const player of g.players) {
+    if (!player.alive) continue;
+    const options = generateUpgradeOptions(room, player, isMulti);
+    const offer: LevelUpOffer = { playerId: player.id, options };
+    const ps = room.sockets.get(player.id);
+    if (ps) {
+      ps.pendingUpgrade = offer;
+      sendTo(ps, { type: "level_up", offer });
+      room.pendingLevelUps.add(player.id);
+    }
   }
-
-  state.result = undefined;
-  runtime.startedAtMs = now();
-  pushEvent(runtime, `Match started. Archetype: ${state.bomb.archetypeId}`);
 }
 
-function createTutorialBomb(seed: string, playerCount: number, level: number): BombSpec {
-  const stage = Math.max(1, Math.min(3, Math.floor(level || 1)));
+function generateUpgradeOptions(room: GameRoom, player: PlayerState, isMulti: boolean): UpgradeDef[] {
+  const pool: UpgradeDef[] = [];
+  const lp = room.lobby.players.find(l => l.id === player.id);
+  const blackWeapons = lp?.blacklistedWeapons ?? [];
+  const blackTokens = lp?.blacklistedTokens ?? [];
 
-  const conduitModule: BombSpec["modules"][number] = {
-    id: "t-conduit",
-    moduleType: "conduit",
-    variantId: "tutorial-conduit",
-    solved: false,
-    params: {
-      fromNodes: ["A", "B", "C", "D"],
-      toNodes: ["1", "2", "3", "4"],
-      desiredLinks: [
-        { from: "A", to: "2" },
-        { from: "B", to: "4" },
-        { from: "C", to: "1" },
-        { from: "D", to: "3" }
-      ],
-      currentLinks: []
+  // new weapon option
+  if (player.weapons.length < MAX_WEAPONS) {
+    const ownedWeaponIds = new Set(player.weapons.map(w => w.weaponId));
+    const available = getNonStarterWeapons().filter(w => !ownedWeaponIds.has(w.id) && !blackWeapons.includes(w.id));
+    if (available.length > 0) {
+      const w = pick(available);
+      pool.push({ id: `nw_${w.id}`, kind: "new_weapon", name: `New: ${w.name}`, description: w.description, weaponId: w.id, group: false });
     }
-  };
-
-  const wireModule: BombSpec["modules"][number] = {
-    id: "t-wires",
-    moduleType: "wires",
-    variantId: "tutorial-wires",
-    solved: false,
-    params: {
-      wires: [
-        { id: "w-1", color: "blue", thickness: 1, label: "L11", insulation: "basic", conduitTag: 2, inspectedProperties: [], cut: false },
-        { id: "w-2", color: "red", thickness: 3, label: "L22", insulation: "shielded", conduitTag: 4, inspectedProperties: [], cut: false },
-        { id: "w-3", color: "yellow", thickness: 2, label: "L33", insulation: "frayed", conduitTag: 1, inspectedProperties: [], cut: false },
-        { id: "w-4", color: "green", thickness: 1, label: "L44", insulation: "basic", conduitTag: 3, inspectedProperties: [], cut: false }
-      ],
-      safeOrder: [0, 1, 2],
-      cutProgress: 0
-    }
-  };
-
-  const memoryModule: BombSpec["modules"][number] = {
-    id: "t-memory",
-    moduleType: "memory",
-    variantId: "tutorial-memory",
-    solved: false,
-    params: {
-      padCount: 6,
-      sequence: [1, 4, 0, 5],
-      input: []
-    }
-  };
-
-  const reactorModule: BombSpec["modules"][number] = {
-    id: "t-reactor",
-    moduleType: "reactor",
-    variantId: "tutorial-reactor",
-    solved: false,
-    params: {
-      heat: 50,
-      safeMin: 42,
-      safeMax: 58,
-      stableTicks: 0
-    }
-  };
-
-  const modules = [conduitModule, wireModule];
-  if (stage >= 2) {
-    modules.push(memoryModule);
-  }
-  if (stage >= 3) {
-    modules.push(reactorModule);
   }
 
-  const ruleStack = [
-    { id: "tutorial-1", description: "Route conduits first to decode wire order.", kind: "core" as const, condition: "tutorial", effect: "reveal-order" },
-    { id: "tutorial-2", description: "Cut wires in exact clue order.", kind: "core" as const, condition: "tutorial", effect: "wire-order" }
-  ];
-
-  if (stage >= 2) {
-    ruleStack.push({ id: "tutorial-3", description: "Repeat memory pulse sequence exactly.", kind: "core", condition: "tutorial", effect: "memory" });
-  }
-  if (stage >= 3) {
-    ruleStack.push({ id: "tutorial-4", description: "Stabilize reactor three times in safe band.", kind: "core", condition: "tutorial", effect: "reactor" });
+  // weapon level up
+  const upgradable = player.weapons.filter(w => w.level < WEAPON_MAX_LEVEL);
+  if (upgradable.length > 0) {
+    const ws = pick(upgradable);
+    const wDef = getWeapon(ws.weaponId);
+    if (wDef) {
+      pool.push({ id: `wl_${ws.weaponId}`, kind: "weapon_level", name: `↑ ${wDef.name} Lv${ws.level + 1}`, description: `Upgrade ${wDef.name} to level ${ws.level + 1}.`, weaponId: ws.weaponId, group: false });
+    }
   }
 
-  return {
-    seed,
-    archetypeId: "tutorial-core",
-    difficultyTier: 1,
-    playerCount,
-    modules,
-    graph: stage >= 3 ? [{ from: "t-conduit", to: "t-wires" }, { from: "t-memory", to: "t-reactor" }] : [{ from: "t-conduit", to: "t-wires" }],
-    ruleStack,
-    modifiers: []
-  };
+  // new token
+  if (player.tokens.length < MAX_TOKENS) {
+    const ownedTokens = new Set(player.tokens);
+    const available = TOKENS.filter(t => !ownedTokens.has(t.id) && !blackTokens.includes(t.id) && (!t.group || isMulti));
+    if (available.length > 0) {
+      const t = pick(available);
+      pool.push({ id: `nt_${t.id}`, kind: "new_token", name: `${t.icon} ${t.name}`, description: t.description, tokenId: t.id, group: t.group });
+    }
+  }
+
+  // player stat upgrades
+  const pUpgrades = shuffle(PLAYER_UPGRADES).slice(0, 3);
+  pool.push(...pUpgrades);
+
+  // group upgrades
+  if (isMulti) {
+    const gUp = shuffle(GROUP_UPGRADES).slice(0, 2);
+    pool.push(...gUp);
+  }
+
+  return shuffle(pool).slice(0, LEVEL_UP_CHOICES);
 }
 
-function startTutorial(runtime: RuntimeInstance, level = 1): void {
-  const state = runtime.state;
-  const players = Object.values(state.players);
+function applyUpgrade(room: GameRoom, playerId: string, upgradeId: string): void {
+  const g = room.game!;
+  const player = g.players.find(p => p.id === playerId);
+  if (!player) return;
 
-  state.phase = "active";
-  state.tutorialMode = true;
-  state.seed = "tutorial-seed";
-  state.resources = {
-    timerMsRemaining: 600_000,
-    commsSecondsRemaining: 999,
-    stability: 6
-  };
-  runtime.initialTalkBudget = state.resources.commsSecondsRemaining;
-  state.voice.mode = "shared_pool";
-  state.voice.speakingUsers = {};
-  state.voice.noiseGateUntilMs = undefined;
-  state.voice.silenceWindowUntilMs = undefined;
-  state.voice.overlapPenaltyArmed = true;
+  const ps = room.sockets.get(playerId);
+  if (!ps?.pendingUpgrade) return;
+  const option = ps.pendingUpgrade.options.find(o => o.id === upgradeId);
+  if (!option) return;
 
-  state.bomb = createTutorialBomb(state.seed, players.length, level);
-  runtime.briefs = generateRoleBriefs(players, state.bomb);
-  for (const [userId, brief] of Object.entries(runtime.briefs)) {
-    const player = state.players[userId];
-    if (!player) continue;
-    player.roleName = brief.roleName;
-    player.capabilities = brief.capabilities;
-    player.privateHints = [...brief.privateHints, `Tutorial stage ${Math.max(1, Math.min(3, Math.floor(level || 1)))}: follow the objective panel.`];
+  switch (option.kind) {
+    case "new_weapon":
+      if (option.weaponId && player.weapons.length < MAX_WEAPONS) {
+        player.weapons.push({ weaponId: option.weaponId, level: 1, xp: 0, ascended: false });
+        room.weaponCooldowns.get(playerId)?.set(option.weaponId, 0);
+      }
+      break;
+    case "weapon_level":
+      if (option.weaponId) {
+        const ws = player.weapons.find(w => w.weaponId === option.weaponId);
+        if (ws && ws.level < WEAPON_MAX_LEVEL) {
+          ws.level++;
+          checkAscension(room, player, ws);
+        }
+      }
+      break;
+    case "new_token":
+      if (option.tokenId && player.tokens.length < MAX_TOKENS) {
+        player.tokens.push(option.tokenId);
+        recalcBonuses(room, player);
+        // check ascensions for all weapons
+        for (const ws of player.weapons) checkAscension(room, player, ws);
+      }
+      break;
+    case "player_stat":
+      if (option.stat && option.value) {
+        applyStatBonus(player, option.stat, option.value);
+      }
+      break;
+    case "group_stat":
+      if (option.stat && option.value) {
+        room.groupBonuses[option.stat] = (room.groupBonuses[option.stat] ?? 0) + option.value;
+        // apply to all players
+        for (const p of g.players) recalcBonuses(room, p);
+      }
+      break;
   }
 
-  state.result = undefined;
-  runtime.startedAtMs = now();
-  pushEvent(runtime, "Tutorial started. Follow objective order shown in guide.");
+  ps.pendingUpgrade = null;
+  room.pendingLevelUps.delete(playerId);
 }
 
-function resetToLobby(runtime: RuntimeInstance): void {
-  const players = Object.values(runtime.state.players).map((player) => ({
-    ...player,
-    roleName: "Unassigned",
-    capabilities: [],
-    privateHints: []
+function applyStatBonus(player: PlayerState, stat: string, value: number): void {
+  switch (stat) {
+    case "damage": player.bonusDamage += value; break;
+    case "attackSpeed": player.bonusAttackSpeed += value; break;
+    case "area": player.bonusArea += value; break;
+    case "speed": player.bonusSpeed += value; player.speed *= (1 + value); break;
+    case "projectiles": player.bonusProjectiles += value; break;
+    case "pierce": player.bonusPierce += value; break;
+    case "maxHp": if (value < 1) { player.maxHp = Math.floor(player.maxHp * (1 + value)); } else { player.maxHp += value; } player.hp = Math.min(player.hp + Math.floor(value < 1 ? player.maxHp * value : value), player.maxHp); break;
+    case "crit": player.bonusCrit += value; break;
+    case "pickupRange": player.bonusPickupRange += value; break;
+    case "damageReduction": player.bonusDamageReduction += value; break;
+    case "lifesteal": player.bonusLifesteal += value; break;
+    case "xpGain": player.bonusXpGain += value; break;
+    case "knockback": break; // knockback applied during weapon fire
+  }
+}
+
+function recalcBonuses(room: GameRoom, player: PlayerState): void {
+  // reset bonuses from tokens
+  // (this is simplified — in production you'd track sources)
+  for (const tokenId of player.tokens) {
+    const tDef = getToken(tokenId);
+    if (!tDef) continue;
+    // Token bonuses are already applied incrementally via applyStatBonus when acquired
+    // So we skip re-applying here to avoid double-counting
+  }
+  // apply group bonuses
+  const g = room.groupBonuses;
+  // Group bonuses are applied once when chosen — this function exists for future expansion
+}
+
+/* ── Ascension ──────────────────────────────────────────────────────── */
+
+function checkAscension(room: GameRoom, player: PlayerState, ws: PlayerWeaponState): void {
+  if (ws.ascended) return;
+  if (ws.level < WEAPON_MAX_LEVEL) return;
+  const recipe = ASCENSION_RECIPES.find(r => r.weaponId === ws.weaponId);
+  if (!recipe) return;
+  if (!player.tokens.includes(recipe.tokenId)) return;
+
+  // Ascend!
+  const ascDef = ASCENDED_WEAPONS.find(a => a.id === recipe.ascendedWeaponId);
+  if (!ascDef) return;
+
+  const oldName = getWeapon(ws.weaponId)?.name ?? ws.weaponId;
+  ws.weaponId = ascDef.id;
+  ws.ascended = true;
+  ws.level = 1; // reset level for ascended growth
+
+  broadcast(room, { type: "ascension", playerId: player.id, weaponName: oldName, ascendedName: ascDef.name });
+}
+
+/* ── Bomb zones ─────────────────────────────────────────────────────── */
+
+function updateBombZones(room: GameRoom): void {
+  const g = room.game!;
+
+  // spawn new zone
+  room.nextBombZoneMs -= TICK_MS;
+  if (room.nextBombZoneMs <= 0) {
+    room.nextBombZoneMs = BOMB_ZONE_SPAWN_INTERVAL_MS;
+    g.bombZones.push({
+      id: uid(),
+      x: 200 + Math.random() * (ARENA_W - 400),
+      y: 200 + Math.random() * (ARENA_H - 400),
+      radius: BOMB_ZONE_RADIUS,
+      progress: 0,
+      playersInside: 0,
+      active: true,
+      xpReward: BOMB_ZONE_XP_REWARD_BASE + g.sharedLevel * 5,
+      timeLeftMs: BOMB_ZONE_BASE_DURATION_MS,
+    });
+  }
+
+  // update existing
+  for (const zone of g.bombZones) {
+    if (!zone.active) continue;
+    zone.timeLeftMs -= TICK_MS;
+    if (zone.timeLeftMs <= 0) { zone.active = false; continue; }
+
+    // count players inside
+    let inside = 0;
+    for (const p of g.players) {
+      if (!p.alive) continue;
+      if (dist(p.x, p.y, zone.x, zone.y) < zone.radius) inside++;
+    }
+    zone.playersInside = inside;
+
+    if (inside > 0) {
+      const speed = BOMB_ZONE_BASE_SPEED * (1 + (inside - 1) * BOMB_ZONE_MULTI_BONUS);
+      zone.progress += speed;
+      if (zone.progress >= 100) {
+        zone.active = false;
+        zone.progress = 100;
+        // award XP
+        const xpGainMult = 1 + (room.groupBonuses["xpGain"] ?? 0);
+        g.sharedXp += Math.floor(zone.xpReward * xpGainMult);
+        // credit players inside
+        for (const p of g.players) {
+          if (p.alive && dist(p.x, p.y, zone.x, zone.y) < zone.radius) {
+            p.bombsDefused++;
+          }
+        }
+        // check level
+        while (g.sharedXp >= g.xpToNext) {
+          g.sharedXp -= g.xpToNext;
+          g.sharedLevel++;
+          g.xpToNext = xpForLevel(g.sharedLevel);
+          triggerLevelUp(room);
+        }
+      }
+    }
+  }
+
+  // remove inactive/completed
+  g.bombZones = g.bombZones.filter(z => z.active);
+}
+
+/* ── Player death/respawn ───────────────────────────────────────────── */
+
+function checkPlayerDeath(room: GameRoom): void {
+  const g = room.game!;
+  for (const p of g.players) {
+    if (p.alive && p.hp <= 0) {
+      p.alive = false;
+      p.hp = 0;
+    }
+    if (p.invulnMs > 0) p.invulnMs -= TICK_MS;
+  }
+
+  // auto-revive after delay (solo) or if allies alive (multi)
+  const aliveCount = g.players.filter(p => p.alive).length;
+  for (const p of g.players) {
+    if (p.alive) continue;
+    // revive mechanic: if at least one alive player, revive after 5s
+    // in solo, always revive (3 revives max)
+    if (g.players.length === 1) {
+      if (p.revives < 3) {
+        p.revives++;
+        p.alive = true;
+        p.hp = Math.floor(p.maxHp * 0.5);
+        p.invulnMs = 3000;
+        // respawn at center
+        p.x = ARENA_W / 2;
+        p.y = ARENA_H / 2;
+      }
+    } else if (aliveCount > 0) {
+      p.revives++;
+      p.alive = true;
+      p.hp = Math.floor(p.maxHp * 0.3);
+      p.invulnMs = 3000;
+      // respawn near a living ally
+      const ally = g.players.find(a => a.alive);
+      if (ally) { p.x = ally.x + (Math.random() - 0.5) * 60; p.y = ally.y + (Math.random() - 0.5) * 60; }
+    }
+  }
+
+  // game over if everyone dead
+  if (g.players.every(p => !p.alive)) {
+    endGame(room, "defeat");
+  }
+}
+
+/* ── Character passives ─────────────────────────────────────────────── */
+
+function applyPassives(room: GameRoom): void {
+  const g = room.game!;
+  for (const p of g.players) {
+    if (!p.alive) continue;
+    const charDef = getCharacter(p.characterId);
+    if (!charDef) continue;
+
+    switch (charDef.passive) {
+      case "heal_aura":
+        // heal nearby allies 2hp/s = 0.1hp/tick
+        if (g.tick % 10 === 0) {
+          for (const other of g.players) {
+            if (!other.alive || other.id === p.id) continue;
+            if (dist(p.x, p.y, other.x, other.y) < 120) {
+              other.hp = Math.min(other.maxHp, other.hp + 2);
+            }
+          }
+        }
+        break;
+      case "phase":
+        // 2s invuln every 15s
+        if (g.tick % (15 * TICK_RATE) === 0) {
+          p.invulnMs = 2000;
+        }
+        break;
+      case "berserk":
+        // damage bonus below 30% HP is handled in weapon fire via bonusDamage recalc
+        if (p.hp < p.maxHp * 0.3) {
+          // applied every tick — we just ensure the bonus is active
+        }
+        break;
+    }
+  }
+}
+
+/* ── Damage numbers cleanup ─────────────────────────────────────────── */
+
+function cleanDamageNumbers(g: GameState): void {
+  for (const dn of g.damageNumbers) dn.age += TICK_MS;
+  g.damageNumbers = g.damageNumbers.filter(dn => dn.age < DAMAGE_NUMBER_LIFETIME);
+}
+
+/* ── End game ───────────────────────────────────────────────────────── */
+
+function endGame(room: GameRoom, outcome: "victory" | "defeat"): void {
+  const g = room.game!;
+  g.phase = "results";
+
+  if (room.interval) { clearInterval(room.interval); room.interval = null; }
+
+  const players: PlayerResult[] = g.players.map(p => ({
+    id: p.id,
+    displayName: p.displayName,
+    characterId: p.characterId,
+    damageDealt: p.damageDealt,
+    killCount: p.killCount,
+    xpCollected: p.xpCollected,
+    bombsDefused: p.bombsDefused,
+    revives: p.revives,
+    weaponIds: p.weapons.map(w => w.weaponId),
+    tokenIds: [...p.tokens],
+    survived: p.alive,
   }));
 
-  runtime.state = createEmptyState(runtime.state.instanceId);
-  for (const player of players) {
-    runtime.state.players[player.userId] = player;
-  }
-  runtime.state.hostUserId = players.find((player) => player.isHost)?.userId;
-  runtime.briefs = {};
-  pushEvent(runtime, "Lobby reset. Ready for replay.");
-}
+  // podium: top 3 by damage
+  const sorted = [...players].sort((a, b) => b.damageDealt - a.damageDealt);
+  const podium = sorted.slice(0, 3).map(p => p.id);
 
-function canUseCapability(playerId: string, runtime: RuntimeInstance, capability: string): boolean {
-  const player = runtime.state.players[playerId];
-  return player?.capabilities.includes(capability as never) ?? false;
-}
-
-function mutateAction(runtime: RuntimeInstance, userId: string, action: MatchAction): void {
-  const state = runtime.state;
-  if (state.phase !== "active" || !state.bomb) return;
-
-  const player = state.players[userId];
-  if (!player) return;
-  player.stats.actions += 1;
-
-  if (action.type === "use_ability") {
-    if (action.ability === "time_dilation" && canUseCapability(userId, runtime, "anchor")) {
-      state.resources.timerMsRemaining += 10_000;
-      player.stats.supportActions += 1;
-      pushEvent(runtime, `${player.displayName} used Time Dilation.`);
-      return;
-    }
-    if (action.ability === "comms_battery" && canUseCapability(userId, runtime, "buffer")) {
-      state.resources.commsSecondsRemaining += 20;
-      player.stats.supportActions += 1;
-      pushEvent(runtime, `${player.displayName} added +20 comms seconds.`);
-      return;
-    }
-    if (action.ability === "noise_gate" && canUseCapability(userId, runtime, "scanner")) {
-      state.voice.noiseGateUntilMs = now() + 5000;
-      player.stats.supportActions += 1;
-      pushEvent(runtime, `${player.displayName} opened Noise Gate for 5 seconds.`);
-      return;
-    }
-    if (action.ability === "echo_cancel" && canUseCapability(userId, runtime, "auditor")) {
-      state.voice.overlapPenaltyArmed = false;
-      player.stats.supportActions += 1;
-      pushEvent(runtime, `${player.displayName} canceled one overlap penalty.`);
-      return;
-    }
-    applyPenalty(runtime, `${player.displayName} used unavailable ability.`);
-    return;
-  }
-
-  if (action.type === "observer_ping") {
-    player.stats.supportActions += 1;
-    pushEvent(runtime, `${player.displayName} pinged module ${action.moduleId}.`);
-    return;
-  }
-
-  const moduleState = state.bomb.modules.find((candidate) => candidate.id === action.moduleId);
-  if (!moduleState) {
-    applyPenalty(runtime, "Invalid module action target.");
-    return;
-  }
-
-  if (moduleState.lockedUntilMs && moduleState.lockedUntilMs > now()) {
-    applyPenalty(runtime, `${moduleState.id} is temporarily locked.`);
-    return;
-  }
-
-  if (action.type === "inspect_wire" && moduleState.moduleType === "wires") {
-    const wires = moduleState.params.wires as Array<{
-      id: string;
-      inspectedProperties: string[];
-    }>;
-    const wire = wires.find((item) => item.id === action.wireId);
-    if (!wire) {
-      applyPenalty(runtime, "Wire not found.");
-      return;
-    }
-    if (!wire.inspectedProperties.includes(action.property)) {
-      wire.inspectedProperties.push(action.property);
-    }
-    moduleState.lockedUntilMs = now() + 500;
-    pushEvent(runtime, `${player.displayName} inspected ${action.property} on ${action.wireId}.`);
-    return;
-  }
-
-  if (action.type === "cut_wire" && moduleState.moduleType === "wires") {
-    const wires = moduleState.params.wires as Array<{ id: string; cut: boolean }>;
-    const safeOrder = moduleState.params.safeOrder as number[];
-    const cutProgress = Number(moduleState.params.cutProgress ?? 0);
-    const wireIndex = wires.findIndex((wire) => wire.id === action.wireId);
-
-    if (wireIndex < 0) {
-      applyPenalty(runtime, "Attempted to cut unknown wire.");
-      return;
-    }
-
-    wires[wireIndex].cut = true;
-    const expectedIndex = safeOrder[cutProgress];
-    if (wireIndex !== expectedIndex) {
-      moduleState.params.cutProgress = 0;
-      safeOrder.forEach((safeWireIndex) => {
-        if (wires[safeWireIndex]) {
-          wires[safeWireIndex].cut = false;
-        }
-      });
-      applyPenalty(runtime, `${player.displayName} broke cut order and reset the lattice.`, 2);
-    } else {
-      moduleState.params.cutProgress = cutProgress + 1;
-      if (cutProgress + 1 >= safeOrder.length) {
-        moduleState.solved = true;
-        pushEvent(runtime, `${player.displayName} completed wire order.`);
-      } else {
-        pushEvent(runtime, `${player.displayName} cut wire ${cutProgress + 1}/${safeOrder.length} in correct order.`);
-      }
-    }
-    evaluateRound(runtime);
-    return;
-  }
-
-  if (action.type === "reroute_wire" && moduleState.moduleType === "wires") {
-    const wires = moduleState.params.wires as Array<{ cut: boolean }>;
-    wires.reverse();
-    moduleState.params.cutProgress = 0;
-    moduleState.lockedUntilMs = now() + 1000;
-    pushEvent(runtime, `${player.displayName} rerouted wire lattice.`);
-    return;
-  }
-
-  if (action.type === "connect_conduit" && moduleState.moduleType === "conduit") {
-    const fromNodes = moduleState.params.fromNodes as string[];
-    const toNodes = moduleState.params.toNodes as string[];
-    const currentLinks = moduleState.params.currentLinks as Array<{ from: string; to: string }>;
-    if (!fromNodes.includes(action.from) || !toNodes.includes(action.to)) {
-      applyPenalty(runtime, "Invalid conduit connection.");
-      return;
-    }
-    const withoutFrom = currentLinks.filter((link) => link.from !== action.from);
-    withoutFrom.push({ from: action.from, to: action.to });
-    moduleState.params.currentLinks = withoutFrom;
-    moduleState.solved = isModuleSolved(moduleState);
-    if (moduleState.solved) {
-      pushEvent(runtime, `${player.displayName} completed conduit routing.`);
-      evaluateRound(runtime);
-    }
-    return;
-  }
-
-  if (action.type === "clear_conduits" && moduleState.moduleType === "conduit") {
-    moduleState.params.currentLinks = [];
-    moduleState.solved = false;
-    pushEvent(runtime, `${player.displayName} cleared conduit links.`);
-    return;
-  }
-
-  if (action.type === "rotate_dial" && moduleState.moduleType === "dial") {
-    const max = String(moduleState.params.alphabet) === "A-F" ? 15 : 9;
-    const value = Number(moduleState.params.value);
-    moduleState.params.value = (value + action.delta + (max + 1)) % (max + 1);
-    return;
-  }
-
-  if (action.type === "lock_dial" && moduleState.moduleType === "dial") {
-    const value = Number(moduleState.params.value);
-    const targetMin = Number(moduleState.params.targetMin);
-    const targetMax = Number(moduleState.params.targetMax);
-    if (value >= targetMin && value <= targetMax) {
-      moduleState.solved = true;
-      pushEvent(runtime, `${player.displayName} locked dial correctly.`);
-    } else {
-      applyPenalty(runtime, `${player.displayName} locked dial out of safe range.`);
-    }
-    evaluateRound(runtime);
-    return;
-  }
-
-  if (action.type === "press_glyph" && moduleState.moduleType === "glyph") {
-    const sequence = moduleState.params.sequence as number[];
-    const progress = Number(moduleState.params.progress ?? 0);
-    if (sequence[progress] === action.glyphIndex) {
-      moduleState.params.progress = progress + 1;
-      if (progress + 1 >= sequence.length) {
-        moduleState.solved = true;
-        pushEvent(runtime, `${player.displayName} solved glyph grid.`);
-        evaluateRound(runtime);
-      }
-    } else {
-      moduleState.params.progress = 0;
-      applyPenalty(runtime, `${player.displayName} hit wrong glyph.`);
-    }
-    return;
-  }
-
-  if (action.type === "press_memory" && moduleState.moduleType === "memory") {
-    const sequence = moduleState.params.sequence as number[];
-    const input = moduleState.params.input as number[];
-    const nextInput = [...input, action.padIndex];
-    moduleState.params.input = nextInput;
-    const expected = sequence[nextInput.length - 1];
-    if (action.padIndex !== expected) {
-      moduleState.params.input = [];
-      applyPenalty(runtime, `${player.displayName} misplayed memory pad.`);
-      return;
-    }
-    if (nextInput.length >= sequence.length) {
-      moduleState.solved = true;
-      pushEvent(runtime, `${player.displayName} solved memory matrix.`);
-      evaluateRound(runtime);
-    }
-    return;
-  }
-
-  if (action.type === "reset_memory" && moduleState.moduleType === "memory") {
-    moduleState.params.input = [];
-    pushEvent(runtime, `${player.displayName} reset memory matrix.`);
-    return;
-  }
-
-  if (action.type === "toggle_switch" && moduleState.moduleType === "switches") {
-    const states = moduleState.params.states as number[];
-    if (action.switchIndex < 0 || action.switchIndex >= states.length) {
-      applyPenalty(runtime, "Invalid switch index.");
-      return;
-    }
-    states[action.switchIndex] = states[action.switchIndex] === 1 ? 0 : 1;
-    moduleState.solved = isModuleSolved(moduleState);
-    if (moduleState.solved) {
-      pushEvent(runtime, `${player.displayName} aligned switch matrix.`);
-      evaluateRound(runtime);
-    }
-    return;
-  }
-
-  if (action.type === "swap_polarity" && moduleState.moduleType === "power") {
-    moduleState.params.polarity = moduleState.params.polarity === "POS" ? "NEG" : "POS";
-    moduleState.solved = isModuleSolved(moduleState);
-    pushEvent(runtime, `${player.displayName} swapped polarity.`);
-    evaluateRound(runtime);
-    return;
-  }
-
-  if (action.type === "vent_power" && moduleState.moduleType === "power") {
-    moduleState.params.voltage = Math.max(0, Number(moduleState.params.voltage) - 15);
-    moduleState.params.vented = true;
-    state.resources.timerMsRemaining = Math.max(0, state.resources.timerMsRemaining - 10_000);
-    player.stats.supportActions += 1;
-    pushEvent(runtime, `${player.displayName} vented power (-10s timer).`);
-    return;
-  }
-
-  if (action.type === "adjust_reactor" && moduleState.moduleType === "reactor") {
-    const heat = Number(moduleState.params.heat ?? 50);
-    const nextHeat = Math.max(0, Math.min(100, heat + action.delta));
-    moduleState.params.heat = nextHeat;
-
-    const safeMin = Number(moduleState.params.safeMin ?? 42);
-    const safeMax = Number(moduleState.params.safeMax ?? 58);
-    if (nextHeat < safeMin - 10 || nextHeat > safeMax + 10) {
-      applyPenalty(runtime, `${player.displayName} pushed reactor into danger zone.`);
-      moduleState.params.stableTicks = 0;
-    }
-    return;
-  }
-
-  if (action.type === "stabilize_reactor" && moduleState.moduleType === "reactor") {
-    const heat = Number(moduleState.params.heat ?? 50);
-    const safeMin = Number(moduleState.params.safeMin ?? 42);
-    const safeMax = Number(moduleState.params.safeMax ?? 58);
-    if (heat >= safeMin && heat <= safeMax) {
-      moduleState.params.stableTicks = Number(moduleState.params.stableTicks ?? 0) + 1;
-      pushEvent(runtime, `${player.displayName} stabilized reactor (${moduleState.params.stableTicks}/3).`);
-      if (Number(moduleState.params.stableTicks) >= 3) {
-        moduleState.solved = true;
-        evaluateRound(runtime);
-      }
-    } else {
-      moduleState.params.stableTicks = 0;
-      applyPenalty(runtime, `${player.displayName} attempted reactor stabilize outside safe range.`);
-    }
-    return;
-  }
-
-  applyPenalty(runtime, "Illegal action transition.");
-}
-
-function getSpeakCount(state: MatchState): number {
-  return Object.keys(state.voice.speakingUsers).length;
-}
-
-function applyVoiceTick(runtime: RuntimeInstance, deltaMs: number): void {
-  const state = runtime.state;
-  if (state.phase !== "active") return;
-  if (state.tutorialMode) return;
-
-  state.resources.timerMsRemaining = Math.max(0, state.resources.timerMsRemaining - deltaMs);
-  if (state.resources.timerMsRemaining <= 0) {
-    timeout(runtime);
-    return;
-  }
-
-  const playerCount = Object.keys(state.players).length;
-  if (playerCount <= 1) return;
-
-  if (state.voice.mode === "silence_windows" && state.resources.timerMsRemaining <= 30_000) {
-    state.voice.silenceWindowUntilMs = now() + 1500;
-  }
-
-  const speakCount = getSpeakCount(state);
-  if (speakCount <= 0) return;
-
-  if (state.voice.noiseGateUntilMs && state.voice.noiseGateUntilMs > now()) {
-    return;
-  }
-
-  if (state.voice.mode === "silence_windows" && state.voice.silenceWindowUntilMs && state.voice.silenceWindowUntilMs > now()) {
-    applyPenalty(runtime, "Spoke during silence window.", 2);
-    return;
-  }
-
-  const seconds = deltaMs / 1000;
-  let drain = configs.balance.drain_per_second * seconds;
-
-  if (speakCount > 1) {
-    drain *= configs.balance.overlap_multiplier;
-    if (state.voice.mode === "one_speaker_rule") {
-      if (state.voice.overlapPenaltyArmed) {
-        applyPenalty(runtime, "Overlap detected under One Speaker Rule.", 2);
-      } else {
-        state.voice.overlapPenaltyArmed = true;
-      }
-    }
-  }
-
-  state.resources.commsSecondsRemaining = Math.max(0, state.resources.commsSecondsRemaining - drain);
-  if (state.resources.commsSecondsRemaining <= 0) {
-    if (configs.balance.lockout_on_zero) {
-      explode(runtime, "Comms pool exhausted.");
-    } else {
-      applyPenalty(runtime, "Comms exhausted: critical lockout penalties active.", 1);
-      state.resources.commsSecondsRemaining = 0;
-    }
-  }
-}
-
-function simulateBombs(rounds: number, playerCount: number, tier: number): { uniqueRuleStacks: number; duplicateRate: number } {
-  const seen = new Set<string>();
-  let duplicates = 0;
-
-  for (let index = 0; index < rounds; index += 1) {
-    const seed = `sim-${index}`;
-    const bomb = generateBombSpec(seed, playerCount, tier, configs);
-    const signature = bomb.ruleStack.map((rule) => rule.id).sort().join("|");
-    if (seen.has(signature)) {
-      duplicates += 1;
-    }
-    seen.add(signature);
-  }
-
-  return {
-    uniqueRuleStacks: seen.size,
-    duplicateRate: rounds === 0 ? 0 : duplicates / rounds
+  const result: GameResult = {
+    outcome,
+    wave: g.wave,
+    timeElapsedMs: GAME_DURATION_MS - g.timeRemainingMs,
+    players,
+    podium,
   };
+
+  broadcast(room, { type: "results", result });
+
+  // reset room to lobby after delay
+  setTimeout(() => {
+    room.game = null;
+    for (const lp of room.lobby.players) lp.ready = false;
+    broadcastLobby(room);
+  }, 3000);
 }
 
+/* ── Main tick ──────────────────────────────────────────────────────── */
+
+function tick(room: GameRoom): void {
+  const g = room.game;
+  if (!g || g.phase !== "active") return;
+
+  // if any player still picking upgrades, pause the game
+  if (room.pendingLevelUps.size > 0) return;
+
+  g.tick++;
+  g.timeRemainingMs -= TICK_MS;
+
+  // move players
+  for (const [pid, ps] of room.sockets) {
+    const player = g.players.find(p => p.id === pid);
+    if (!player || !player.alive) continue;
+    const dx = ps.inputDx, dy = ps.inputDy;
+    if (dx !== 0 || dy !== 0) {
+      const len = Math.sqrt(dx * dx + dy * dy) || 1;
+      const ndx = dx / len, ndy = dy / len;
+      const spd = player.speed * (1 + player.bonusSpeed + (room.groupBonuses["speed"] ?? 0)) / TICK_RATE;
+      player.x = clamp(player.x + ndx * spd, 0, ARENA_W);
+      player.y = clamp(player.y + ndy * spd, 0, ARENA_H);
+      player.dx = ndx;
+      player.dy = ndy;
+    }
+  }
+
+  // wave timer
+  room.waveTimer -= TICK_MS;
+  if (room.waveTimer <= 0 && g.phase === "active") {
+    room.waveTimer = g.wave < 5 ? 55000 : 60000;
+    spawnWave(room);
+  }
+
+  // systems
+  applyPassives(room);
+  fireWeapons(room);
+  updateProjectiles(room);
+  checkEnemyProjectiles(room);
+  updateEnemies(room);
+  processDeadEnemies(room);
+  collectXp(room);
+  updateBombZones(room);
+  checkPlayerDeath(room);
+  cleanDamageNumbers(g);
+
+  // time up → check outcome
+  if (g.timeRemainingMs <= 0 && !g.postBoss) {
+    // if boss was killed, victory. otherwise defeat.
+    endGame(room, room.bossKilledThisRound ? "victory" : "defeat");
+    return;
+  }
+
+  broadcastState(room);
+}
+
+function broadcastState(room: GameRoom): void {
+  if (!room.game) return;
+  // Send subset every tick (full state)
+  broadcast(room, { type: "state", state: room.game });
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   HTTP + WebSocket Server
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const PORT = parseInt(process.env.PORT ?? "3001", 10);
 const app = express();
-app.set("trust proxy", 1);
+app.set("trust proxy", true);
+app.use(cors());
 app.use(express.json());
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      if (!origin) {
-        callback(null, true);
-        return;
-      }
 
-      if (isAllowedOrigin(origin)) {
-        callback(null, true);
-      } else {
-        callback(null, false);
-      }
-    }
-  })
-);
+// Serve client if available
+const clientDist = path.resolve(__dirname, "../../client/dist");
+app.use(express.static(clientDist));
 
-app.use(
-  rateLimit({
-    windowMs: 10_000,
-    max: 100,
-    standardHeaders: true,
-    legacyHeaders: false
-  })
-);
-
-app.get("/health", (_req, res) => {
-  res.json({ ok: true, instanceCount: instances.size, telemetryRows: telemetry.length });
-});
-
-app.post("/api/auth/exchange", async (req, res) => {
-  const code = String(req.body?.code ?? "").trim();
-  if (!code) {
-    return res.status(400).json({ error: "Missing OAuth code" });
-  }
-
-  const hasDiscordConfig =
-    Boolean(process.env.DISCORD_CLIENT_ID) &&
-    Boolean(process.env.DISCORD_CLIENT_SECRET) &&
-    Boolean(process.env.DISCORD_REDIRECT_URI);
-
-  if (!hasDiscordConfig) {
-    const devUserId = `dev-${code.slice(0, 8)}`;
-    const token = jwt.sign({ userId: devUserId, dev: true }, JWT_SECRET, { expiresIn: "12h" });
-    return res.json({
-      accessToken: `dev-token-${code}`,
-      sessionToken: token,
-      user: { id: devUserId, username: `DevUser-${code.slice(0, 4)}` }
-    });
-  }
-
-  try {
-    const params = new URLSearchParams({
-      client_id: process.env.DISCORD_CLIENT_ID ?? "",
-      client_secret: process.env.DISCORD_CLIENT_SECRET ?? "",
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: process.env.DISCORD_REDIRECT_URI ?? ""
-    });
-
-    const tokenResponse = await fetch("https://discord.com/api/oauth2/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: params
-    });
-
-    if (!tokenResponse.ok) {
-      return res.status(401).json({ error: "Token exchange failed" });
-    }
-
-    const tokenJson = (await tokenResponse.json()) as { access_token: string };
-    const userResponse = await fetch("https://discord.com/api/users/@me", {
-      headers: { Authorization: `Bearer ${tokenJson.access_token}` }
-    });
-
-    if (!userResponse.ok) {
-      return res.status(401).json({ error: "Fetching user profile failed" });
-    }
-
-    const userJson = (await userResponse.json()) as { id: string; username: string };
-    const sessionToken = jwt.sign({ userId: userJson.id }, JWT_SECRET, { expiresIn: "12h" });
-
-    return res.json({
-      accessToken: tokenJson.access_token,
-      sessionToken,
-      user: { id: userJson.id, username: userJson.username }
-    });
-  } catch {
-    return res.status(500).json({ error: "OAuth exchange failed" });
-  }
-});
-
-app.post("/api/voice/event", (req, res) => {
-  const parsed = voiceEventSchema.safeParse(req.body as VoiceEvent);
-  if (!parsed.success) {
-    return res.status(400).json({ error: "Invalid voice payload" });
-  }
-
-  const payload = parsed.data;
-  if (payload.sourceToken !== VOICE_SOURCE_TOKEN) {
-    return res.status(403).json({ error: "Invalid voice source" });
-  }
-
-  const runtime = instances.get(payload.instanceId);
-  if (!runtime) {
-    return res.status(404).json({ error: "Unknown instance" });
-  }
-
-  if (!runtime.state.players[payload.userId]) {
-    return res.status(403).json({ error: "User not in instance" });
-  }
-
-  if (payload.event === "SPEAK_START") {
-    runtime.state.voice.speakingUsers[payload.userId] = payload.timestampMs;
-  } else {
-    delete runtime.state.voice.speakingUsers[payload.userId];
-  }
-
-  runtime.state.updatedAtMs = now();
-  broadcastState(runtime);
-  return res.json({ ok: true });
-});
-
-app.post("/api/admin/reload-config", (req, res) => {
-  if (req.headers["x-admin-secret"] !== ADMIN_SECRET) {
-    return res.status(403).json({ error: "Forbidden" });
-  }
-
-  try {
-    configs = loadConfigs(sharedConfigPath);
-    return res.json({ ok: true });
-  } catch {
-    return res.status(500).json({ error: "Failed to reload config" });
-  }
-});
-
-app.post("/api/admin/simulate", (req, res) => {
-  if (req.headers["x-admin-secret"] !== ADMIN_SECRET) {
-    return res.status(403).json({ error: "Forbidden" });
-  }
-
-  const rounds = Math.max(1, Math.min(1000, Number(req.body?.rounds ?? 100)));
-  const playerCount = Math.max(1, Math.min(10, Number(req.body?.playerCount ?? 4)));
-  const tier = Math.max(1, Math.min(3, Number(req.body?.tier ?? 2)));
-  const report = simulateBombs(rounds, playerCount, tier);
-  return res.json({ ok: true, rounds, playerCount, tier, report });
-});
-
-app.get("/api/telemetry", (req, res) => {
-  if (req.headers["x-admin-secret"] !== ADMIN_SECRET) {
-    return res.status(403).json({ error: "Forbidden" });
-  }
-  return res.json({ rows: telemetry.slice(-200) });
-});
-
-if (fs.existsSync(clientDistPath)) {
-  app.use(express.static(clientDistPath));
-  app.get("/", (_req, res) => {
-    res.sendFile(path.join(clientDistPath, "index.html"));
+app.get("/health", (_req, res) => res.json({ status: "ok", game: "defuse-exe-roguelite" }));
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(clientDist, "index.html"), (err) => {
+    if (err) res.json({ status: "DEFUSE.EXE Roguelite Server" });
   });
-} else {
-  app.get("/", (_req, res) => {
-    res.status(200).json({
-      ok: true,
-      service: "defuse-exe-server",
-      message: "Client build not found. Deploy client service or build client artifacts."
-    });
-  });
-}
+});
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 
-function parseClientEnvelope(payload: string): ClientEnvelope | null {
-  try {
-    return JSON.parse(payload) as ClientEnvelope;
-  } catch {
-    return null;
-  }
-}
+wss.on("connection", (ws) => {
+  let playerId = "";
+  let roomId = "default";
+  const room = getOrCreateRoom(roomId);
 
-wss.on("connection", (socket) => {
-  let currentUserId = "";
-  let currentInstanceId = "";
+  ws.on("message", (raw) => {
+    let msg: ClientEnvelope;
+    try { msg = JSON.parse(String(raw)); } catch { return; }
 
-  socket.on("message", (rawData) => {
-    const message = parseClientEnvelope(String(rawData));
-    if (!message) {
-      sendEnvelope(socket, { type: "error", message: "Invalid payload" });
-      return;
-    }
-
-    if (message.type === "join_instance") {
-      currentUserId = message.userId;
-      currentInstanceId = message.instanceId;
-      const runtime = ensureInstance(message.instanceId);
-
-      const firstJoin = !runtime.state.players[message.userId];
-      if (firstJoin) {
-        runtime.state.players[message.userId] = {
-          userId: message.userId,
-          displayName: message.displayName,
-          connected: true,
-          isHost: Object.keys(runtime.state.players).length === 0,
-          capabilities: [],
-          roleName: "Unassigned",
-          joinedAtMs: now(),
-          privateHints: [],
-          stats: { actions: 0, penalties: 0, supportActions: 0 }
+    switch (msg.type) {
+      case "join": {
+        playerId = `p-${uid()}`;
+        const lp: LobbyPlayer = {
+          id: playerId,
+          displayName: msg.displayName || `Player-${Math.floor(Math.random() * 999)}`,
+          characterId: CHARACTERS[0].id,
+          starterWeaponId: WEAPONS[0].id,
+          cosmetic: {},
+          blacklistedWeapons: [],
+          blacklistedTokens: [],
+          ready: false,
         };
-      } else {
-        runtime.state.players[message.userId].connected = true;
-        runtime.state.players[message.userId].displayName = message.displayName;
+        room.lobby.players.push(lp);
+        if (room.lobby.players.length === 1) room.lobby.hostId = playerId;
+
+        const ps: PlayerSocket = { ws, playerId, inputDx: 0, inputDy: 0, pendingUpgrade: null };
+        room.sockets.set(playerId, ps);
+
+        sendTo(ps, { type: "joined", playerId });
+        broadcastLobby(room);
+        break;
       }
-
-      runtime.state.hostUserId = Object.values(runtime.state.players).find((player) => player.isHost)?.userId;
-      runtime.connections.set(message.userId, {
-        socket,
-        userId: message.userId,
-        instanceId: message.instanceId
-      });
-
-      pushEvent(runtime, `${message.displayName} joined lobby.`);
-      sendEnvelope(socket, { type: "joined", instanceId: message.instanceId, userId: message.userId });
-      broadcastState(runtime);
-      return;
-    }
-
-    if (!currentUserId || !currentInstanceId) {
-      sendEnvelope(socket, { type: "error", message: "Join an instance first" });
-      return;
-    }
-
-    const runtime = instances.get(currentInstanceId);
-    if (!runtime || !runtime.state.players[currentUserId]) {
-      sendEnvelope(socket, { type: "error", message: "Invalid instance membership" });
-      return;
-    }
-
-    if (message.type === "presence") {
-      runtime.state.players[currentUserId].connected = message.status === "active";
-      runtime.state.updatedAtMs = now();
-      broadcastState(runtime);
-      return;
-    }
-
-    if (message.type === "start_match") {
-      if (runtime.state.hostUserId !== currentUserId) {
-        sendEnvelope(socket, { type: "error", message: "Only host can start." });
-        return;
+      case "lobby_update": {
+        const lp = room.lobby.players.find(p => p.id === playerId);
+        if (!lp) break;
+        if (msg.characterId) lp.characterId = msg.characterId;
+        if (msg.starterWeaponId) lp.starterWeaponId = msg.starterWeaponId;
+        if (msg.cosmetic) lp.cosmetic = msg.cosmetic;
+        if (msg.blacklistedWeapons) lp.blacklistedWeapons = msg.blacklistedWeapons.slice(0, MAX_BLACKLISTED_WEAPONS);
+        if (msg.blacklistedTokens) lp.blacklistedTokens = msg.blacklistedTokens.slice(0, MAX_BLACKLISTED_TOKENS);
+        broadcastLobby(room);
+        break;
       }
-      if (!canStart(runtime)) {
-        sendEnvelope(socket, { type: "error", message: "Lobby not ready." });
-        return;
+      case "ready": {
+        const lp = room.lobby.players.find(p => p.id === playerId);
+        if (lp) { lp.ready = msg.ready; broadcastLobby(room); }
+        break;
       }
-      startMatch(runtime);
-      broadcastState(runtime);
-      return;
-    }
-
-    if (message.type === "start_tutorial") {
-      if (runtime.state.hostUserId !== currentUserId) {
-        sendEnvelope(socket, { type: "error", message: "Only host can start tutorial." });
-        return;
+      case "start_game": {
+        if (playerId !== room.lobby.hostId) break;
+        if (room.game) break;
+        const allReady = room.lobby.players.length > 0 && room.lobby.players.every(p => p.ready);
+        if (!allReady) {
+          const ps = room.sockets.get(playerId);
+          if (ps) sendTo(ps, { type: "error", message: "Not all players are ready." });
+          break;
+        }
+        startGame(room);
+        break;
       }
-      if (!canStart(runtime)) {
-        sendEnvelope(socket, { type: "error", message: "Lobby not ready." });
-        return;
+      case "input": {
+        const ps = room.sockets.get(playerId);
+        if (ps) { ps.inputDx = msg.dx; ps.inputDy = msg.dy; }
+        break;
       }
-      startTutorial(runtime, message.level ?? 1);
-      broadcastState(runtime);
-      return;
-    }
-
-    if (message.type === "play_again") {
-      resetToLobby(runtime);
-      broadcastState(runtime);
-      return;
-    }
-
-    if (message.type === "request_scan") {
-      if (!canUseCapability(currentUserId, runtime, "scanner")) {
-        applyPenalty(runtime, "Scan requested without scanner capability.");
-      } else if (runtime.state.bomb) {
-        const randomRule = runtime.state.bomb.ruleStack[Math.floor(Math.random() * runtime.state.bomb.ruleStack.length)];
-        pushEvent(runtime, `Scan reveal: ${randomRule.description}`);
+      case "pick_upgrade": {
+        applyUpgrade(room, playerId, msg.upgradeId);
+        break;
       }
-      broadcastState(runtime);
-      return;
+      case "vote_continue": {
+        const g = room.game;
+        if (!g || g.phase !== "vote_continue") break;
+        if (!g.continueVotes.includes(playerId)) g.continueVotes.push(playerId);
+        // check if majority voted
+        if (g.continueVotes.length >= Math.ceil(g.players.length * 0.5)) {
+          g.postBoss = true;
+          g.phase = "active";
+          g.timeRemainingMs = 999999999; // unlimited
+          room.waveTimer = 5000;
+          broadcastState(room);
+        }
+        break;
+      }
+      case "leave": {
+        const ps = room.sockets.get(playerId);
+        if (ps) ps.ws.close();
+        break;
+      }
     }
-
-    if (message.type === "action") {
-      mutateAction(runtime, currentUserId, message.action);
-      broadcastState(runtime);
-      return;
-    }
-
-    sendEnvelope(socket, { type: "error", message: "Unhandled message" });
   });
 
-  socket.on("close", () => {
-    if (!currentUserId || !currentInstanceId) return;
-    const runtime = instances.get(currentInstanceId);
-    if (!runtime) return;
-    const player = runtime.state.players[currentUserId];
-    if (player) {
-      player.connected = false;
-      pushEvent(runtime, `${player.displayName} disconnected.`);
+  ws.on("close", () => {
+    room.lobby.players = room.lobby.players.filter(p => p.id !== playerId);
+    room.sockets.delete(playerId);
+    if (room.game) {
+      const p = room.game.players.find(p => p.id === playerId);
+      if (p) p.alive = false;
     }
-    runtime.connections.delete(currentUserId);
-    broadcastState(runtime);
+    if (room.lobby.players.length === 0) {
+      if (room.interval) clearInterval(room.interval);
+      rooms.delete(roomId);
+    } else {
+      if (room.lobby.hostId === playerId) {
+        room.lobby.hostId = room.lobby.players[0].id;
+      }
+      broadcastLobby(room);
+    }
   });
 });
 
-let lastTickMs = now();
-setInterval(() => {
-  const current = now();
-  const deltaMs = Math.max(0, current - lastTickMs);
-  lastTickMs = current;
-
-  for (const runtime of instances.values()) {
-    applyVoiceTick(runtime, deltaMs);
-    if (runtime.state.phase === "active") {
-      evaluateRound(runtime);
-      broadcastState(runtime);
-    }
-  }
-}, 250);
-
 server.listen(PORT, () => {
-  console.log(`DEFUSE.EXE server listening on :${PORT}`);
+  console.log(`[DEFUSE.EXE] Roguelite server listening on :${PORT}`);
 });

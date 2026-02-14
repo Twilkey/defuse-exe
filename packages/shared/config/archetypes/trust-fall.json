@@ -1,8 +1,0 @@
-{
-  "id": "trust-fall",
-  "name": "Trust Fall",
-  "allowedModules": ["wires", "dial", "glyph", "power", "conduit", "memory", "switches", "reactor"],
-  "ruleWeights": { "core": 1.0, "spice": 1.4, "deception": 1.2 },
-  "talkModeWeights": { "shared_pool": 0.3, "tokenized_burst": 0.15, "silence_windows": 0.25, "one_speaker_rule": 0.3 },
-  "skinTheme": "void"
-}

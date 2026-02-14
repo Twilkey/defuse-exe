@@ -12,9 +12,7 @@
     "lint": "echo \"No lint configured for shared\"",
     "check:determinism": "tsx src/scripts/checkDeterminism.ts"
   },
-  "dependencies": {
-    "zod": "^3.24.1"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/node": "^22.10.2",
     "tsx": "^4.19.2",
