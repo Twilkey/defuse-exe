@@ -37,6 +37,26 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? "http://localhost:5173")
   .split(",")
   .map((item) => item.trim())
   .filter(Boolean);
+const allowAllOrigins = allowedOrigins.includes("*");
+
+function isAllowedOrigin(origin: string): boolean {
+  if (allowAllOrigins) return true;
+
+  for (const allowedOrigin of allowedOrigins) {
+    if (allowedOrigin === origin) {
+      return true;
+    }
+
+    if (allowedOrigin.startsWith("*.")) {
+      const domain = allowedOrigin.slice(2);
+      if (origin.endsWith(`.${domain}`) || origin === `https://${domain}` || origin === `http://${domain}`) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
 const runtimeDir = path.dirname(fileURLToPath(import.meta.url));
 const sharedConfigPath = path.resolve(runtimeDir, "../../shared/config");
 const clientDistPath = path.resolve(runtimeDir, "../../client/dist");
@@ -552,14 +572,20 @@ function simulateBombs(rounds: number, playerCount: number, tier: number): { uni
 }
 
 const app = express();
+app.set("trust proxy", 1);
 app.use(express.json());
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+
+      if (isAllowedOrigin(origin)) {
         callback(null, true);
       } else {
-        callback(new Error("Origin not allowed by CORS"));
+        callback(null, false);
       }
     }
   })
