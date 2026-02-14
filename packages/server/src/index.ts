@@ -211,6 +211,7 @@ function startGame(room: GameRoom): void {
     postBoss: false,
     continueVotes: [],
     hostId: room.lobby.hostId,
+    waveModifier: undefined,
   };
 
   room.interval = setInterval(() => tick(room), TICK_MS);
@@ -238,6 +239,27 @@ function spawnWave(room: GameRoom): void {
   const scaleFactor = 1 + (wave - 1) * 0.12;
   const hpScale = 1 + (wave - 1) * 0.15;
 
+  // Wave modifiers — 30% chance starting wave 3
+  type WaveMod = { label: string; speedMult: number; armor: number; hpMult: number };
+  const WAVE_MODS: WaveMod[] = [
+    { label: "⚡ Speed Surge",   speedMult: 1.6, armor: 0,  hpMult: 1 },
+    { label: "🛡 Armored Wave",  speedMult: 1,   armor: 5,  hpMult: 1.3 },
+    { label: "💀 Elite Swarm",   speedMult: 1.2, armor: 2,  hpMult: 1.2 },
+    { label: "🐜 Tiny Terrors",  speedMult: 1.8, armor: 0,  hpMult: 0.5 },
+    { label: "🔥 Berserkers",    speedMult: 1.4, armor: 0,  hpMult: 0.8 },
+  ];
+  let waveMod: WaveMod | null = null;
+  if (wave >= 3 && Math.random() < 0.3) {
+    waveMod = WAVE_MODS[Math.floor(Math.random() * WAVE_MODS.length)];
+    g.waveModifier = waveMod.label;
+  } else {
+    g.waveModifier = undefined;
+  }
+
+  const modSpeed = waveMod?.speedMult ?? 1;
+  const modArmor = waveMod?.armor ?? 0;
+  const modHp = waveMod?.hpMult ?? 1;
+
   // Normal enemies
   const eligible = ENEMIES.filter(e => e.minWave <= wave && e.spawnWeight > 0);
   const totalWeight = eligible.reduce((s, e) => s + e.spawnWeight, 0);
@@ -259,10 +281,12 @@ function spawnWave(room: GameRoom): void {
       id: uid(),
       defId: def.id,
       x: pos.x, y: pos.y,
-      hp: Math.floor(def.baseHp * hpScale * hpMult),
-      maxHp: Math.floor(def.baseHp * hpScale * hpMult),
+      hp: Math.floor(def.baseHp * hpScale * hpMult * modHp),
+      maxHp: Math.floor(def.baseHp * hpScale * hpMult * modHp),
       rank,
       stunMs: 0,
+      speedMult: modSpeed,
+      armor: modArmor,
     });
   }
 
@@ -276,7 +300,7 @@ function spawnWave(room: GameRoom): void {
       x: pos.x, y: pos.y,
       hp: Math.floor(mbDef.baseHp * hpScale * MINIBOSS_HP_MULT / mbDef.baseHp * mbDef.baseHp),
       maxHp: Math.floor(mbDef.baseHp * hpScale * MINIBOSS_HP_MULT / mbDef.baseHp * mbDef.baseHp),
-      rank: "miniboss", stunMs: 0,
+      rank: "miniboss", stunMs: 0, speedMult: 1, armor: 0,
     });
     broadcast(room, { type: "boss_warning", bossName: mbDef.name });
   }
@@ -292,7 +316,7 @@ function spawnWave(room: GameRoom): void {
       x: pos.x, y: pos.y,
       hp: Math.floor(bossDef.baseHp * hpScale),
       maxHp: Math.floor(bossDef.baseHp * hpScale),
-      rank: "boss", stunMs: 0,
+      rank: "boss", stunMs: 0, speedMult: 1, armor: 0,
     });
     g.bossActive = true;
     broadcast(room, { type: "boss_warning", bossName: bossDef.name });
@@ -372,7 +396,7 @@ function fireWeapons(room: GameRoom): void {
             id: uid(), ownerId: player.id, weaponId: ws.weaponId,
             x: player.x, y: player.y, dx: faceDx, dy: faceDy,
             speed: wDef.baseSpeed, damage, pierce, pierced: 0,
-            area: area * 0.5, lifeMs: wDef.baseDuration * TICK_MS,
+            area: Math.max(area, 12), lifeMs: wDef.baseDuration * TICK_MS,
             pattern: "beam", color: wDef.color, hitEnemies: [],
           });
           break;
@@ -452,7 +476,9 @@ function fireWeapons(room: GameRoom): void {
 function applyDamage(room: GameRoom, player: PlayerState, enemy: EnemyState, baseDmg: number): void {
   const g = room.game!;
   const isCrit = Math.random() < player.bonusCrit;
-  const dmg = isCrit ? Math.floor(baseDmg * CRIT_MULTIPLIER) : baseDmg;
+  let dmg = isCrit ? Math.floor(baseDmg * CRIT_MULTIPLIER) : baseDmg;
+  // enemy armor from wave modifiers
+  dmg = Math.max(1, dmg - (enemy.armor || 0));
   enemy.hp -= dmg;
   player.damageDealt += dmg;
 
@@ -497,7 +523,7 @@ function updateProjectiles(room: GameRoom): void {
         if (d < proj.area) {
           const player = g.players.find(p => p.id === proj.ownerId);
           if (player && !proj.hitEnemies.includes(enemy.id)) {
-            applyDamage(room, player, enemy, Math.floor(proj.damage * 0.3));
+            applyDamage(room, player, enemy, Math.floor(proj.damage * 0.7));
             proj.hitEnemies.push(enemy.id);
           }
         }
@@ -574,19 +600,20 @@ function updateEnemies(room: GameRoom): void {
     if (!nearP) continue;
 
     const rankSpeedMult = enemy.rank === "boss" ? 0.8 : enemy.rank === "miniboss" ? 0.9 : 1;
+    const spdMul = rankSpeedMult * (enemy.speedMult || 1);
 
     if (eDef.enemyClass === "ranged" && nd < 250) {
       // ranged enemies try to keep distance
       const dx = enemy.x - nearP.x, dy = enemy.y - nearP.y;
       const len = Math.sqrt(dx * dx + dy * dy) || 1;
-      enemy.x += (dx / len) * eDef.baseSpeed * 0.5 * rankSpeedMult;
-      enemy.y += (dy / len) * eDef.baseSpeed * 0.5 * rankSpeedMult;
+      enemy.x += (dx / len) * eDef.baseSpeed * 0.5 * spdMul;
+      enemy.y += (dy / len) * eDef.baseSpeed * 0.5 * spdMul;
     } else if (eDef.baseSpeed > 0) {
       // move toward nearest player
       const dx = nearP.x - enemy.x, dy = nearP.y - enemy.y;
       const len = Math.sqrt(dx * dx + dy * dy) || 1;
-      enemy.x += (dx / len) * eDef.baseSpeed * rankSpeedMult;
-      enemy.y += (dy / len) * eDef.baseSpeed * rankSpeedMult;
+      enemy.x += (dx / len) * eDef.baseSpeed * spdMul;
+      enemy.y += (dy / len) * eDef.baseSpeed * spdMul;
     }
 
     // clamp to arena (with some leeway)
@@ -755,10 +782,10 @@ function generateUpgradeOptions(room: GameRoom, player: PlayerState, isMulti: bo
   const lp = room.lobby.players.find(l => l.id === player.id);
   const blackWeapons = lp?.blacklistedWeapons ?? [];
   const blackTokens = lp?.blacklistedTokens ?? [];
+  const ownedWeaponIds = new Set(player.weapons.map(w => w.weaponId));
 
-  // new weapon option
+  // ── New weapon (only if open weapon slots) ──
   if (player.weapons.length < MAX_WEAPONS) {
-    const ownedWeaponIds = new Set(player.weapons.map(w => w.weaponId));
     const available = getNonStarterWeapons().filter(w => !ownedWeaponIds.has(w.id) && !blackWeapons.includes(w.id));
     if (available.length > 0) {
       const w = pick(available);
@@ -766,28 +793,43 @@ function generateUpgradeOptions(room: GameRoom, player: PlayerState, isMulti: bo
     }
   }
 
-  // weapon level up
+  // ── Weapon level-ups (only weapons I own that aren't max) ──
   const upgradable = player.weapons.filter(w => w.level < WEAPON_MAX_LEVEL);
   if (upgradable.length > 0) {
-    const ws = pick(upgradable);
-    const wDef = getWeapon(ws.weaponId);
-    if (wDef) {
-      pool.push({ id: `wl_${ws.weaponId}`, kind: "weapon_level", name: `↑ ${wDef.name} Lv${ws.level + 1}`, description: `Upgrade ${wDef.name} to level ${ws.level + 1}.`, weaponId: ws.weaponId, group: false });
+    // offer up to 2 different weapon level-ups if available
+    const shuffled = shuffle(upgradable);
+    for (let i = 0; i < Math.min(2, shuffled.length); i++) {
+      const ws = shuffled[i];
+      const wDef = getWeapon(ws.weaponId);
+      if (wDef) {
+        pool.push({ id: `wl_${ws.weaponId}`, kind: "weapon_level", name: `↑ ${wDef.name} Lv${ws.level + 1}`, description: `Upgrade ${wDef.name} to level ${ws.level + 1}.`, weaponId: ws.weaponId, group: false });
+      }
     }
   }
 
-  // new token
+  // ── New token (only if open token slots) ──
   if (player.tokens.length < MAX_TOKENS) {
     const ownedTokens = new Set(player.tokens);
-    const available = TOKENS.filter(t => !ownedTokens.has(t.id) && !blackTokens.includes(t.id) && (!t.group || isMulti));
-    if (available.length > 0) {
-      const t = pick(available);
+    // prefer tokens matching weapons I own
+    const matching = TOKENS.filter(t => !ownedTokens.has(t.id) && !blackTokens.includes(t.id) && (!t.group || isMulti) && t.matchingWeaponId && ownedWeaponIds.has(t.matchingWeaponId));
+    const nonMatching = TOKENS.filter(t => !ownedTokens.has(t.id) && !blackTokens.includes(t.id) && (!t.group || isMulti) && (!t.matchingWeaponId || !ownedWeaponIds.has(t.matchingWeaponId)));
+    // 70% chance to offer a matching token if available
+    const tokenPool = matching.length > 0 && Math.random() < 0.7 ? matching : [...matching, ...nonMatching];
+    if (tokenPool.length > 0) {
+      const t = pick(tokenPool);
       pool.push({ id: `nt_${t.id}`, kind: "new_token", name: `${t.icon} ${t.name}`, description: t.description, tokenId: t.id, group: t.group });
     }
   }
 
-  // player stat upgrades
-  const pUpgrades = shuffle(PLAYER_UPGRADES).slice(0, 3);
+  // ── Stat upgrades that are relevant ──
+  // Filter stats based on what makes sense for the player's current weapons
+  const hasProjectileWeapon = player.weapons.some(w => { const d = getWeapon(w.weaponId); return d && (d.pattern === "projectile" || d.pattern === "homing" || d.pattern === "beam"); });
+  const relevantStats = PLAYER_UPGRADES.filter(u => {
+    if (u.stat === "projectiles" && !hasProjectileWeapon) return false;
+    if (u.stat === "pierce" && !hasProjectileWeapon) return false;
+    return true;
+  });
+  const pUpgrades = shuffle(relevantStats).slice(0, 3);
   pool.push(...pUpgrades);
 
   // group upgrades

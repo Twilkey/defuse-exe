@@ -9,12 +9,12 @@ import type {
 // ══════════════════════════════════════════════════════════════════════
 
 export const CHARACTERS: CharacterDef[] = [
-  { id: "scout",      name: "Dasher",     description: "Nimble stick figure with a wide grab range.",     baseSpeed: 140, baseHp: 80,  passive: "pickup_range", passiveDesc: "+30% pickup range",            color: "#38bdf8", accentColor: "#0ea5e9" },
-  { id: "juggernaut", name: "Tank",       description: "Thick-lined stick figure that soaks up damage.",  baseSpeed: 80,  baseHp: 150, passive: "knockback",    passiveDesc: "+20% knockback",               color: "#ef4444", accentColor: "#b91c1c" },
-  { id: "hacker",     name: "Brainiac",   description: "Clever stick figure that extracts bonus XP.",     baseSpeed: 100, baseHp: 100, passive: "xp_gain",      passiveDesc: "+15% XP gain",                 color: "#a3e635", accentColor: "#65a30d" },
-  { id: "medic",      name: "Doc",        description: "Stick figure medic who heals nearby allies.",     baseSpeed: 95,  baseHp: 110, passive: "heal_aura",    passiveDesc: "Heals nearby allies 2 HP/s",   color: "#f472b6", accentColor: "#db2777" },
-  { id: "berserker",  name: "Rager",      description: "Scribbled stick figure that rages when hurt.",    baseSpeed: 120, baseHp: 90,  passive: "berserk",      passiveDesc: "+30% damage below 30% HP",     color: "#fb923c", accentColor: "#ea580c" },
-  { id: "phantom",    name: "Ghost",      description: "Faint stick figure that phases through damage.",  baseSpeed: 105, baseHp: 85,  passive: "phase",        passiveDesc: "2s invuln every 15s",          color: "#c084fc", accentColor: "#9333ea" },
+  { id: "scout",      name: "Dasher",     description: "Nimble stick figure with a wide grab range.",     baseSpeed: 140, baseHp: 80,  passive: "pickup_range", passiveDesc: "+30% pickup range",            color: "#38bdf8", accentColor: "#0ea5e9", visual: "male" },
+  { id: "juggernaut", name: "Tank",       description: "Thick-lined stick figure that soaks up damage.",  baseSpeed: 80,  baseHp: 150, passive: "knockback",    passiveDesc: "+20% knockback",               color: "#ef4444", accentColor: "#b91c1c", visual: "male" },
+  { id: "hacker",     name: "Brainiac",   description: "Clever stick figure that extracts bonus XP.",     baseSpeed: 100, baseHp: 100, passive: "xp_gain",      passiveDesc: "+15% XP gain",                 color: "#a3e635", accentColor: "#65a30d", visual: "female" },
+  { id: "medic",      name: "Doc",        description: "Stick figure medic who heals nearby allies.",     baseSpeed: 95,  baseHp: 110, passive: "heal_aura",    passiveDesc: "Heals nearby allies 2 HP/s",   color: "#f472b6", accentColor: "#db2777", visual: "female" },
+  { id: "berserker",  name: "Rager",      description: "Scribbled stick figure that rages when hurt.",    baseSpeed: 120, baseHp: 90,  passive: "berserk",      passiveDesc: "+30% damage below 30% HP",     color: "#fb923c", accentColor: "#ea580c", visual: "cat" },
+  { id: "phantom",    name: "Ghost",      description: "Faint stick figure that phases through damage.",  baseSpeed: 105, baseHp: 85,  passive: "phase",        passiveDesc: "2s invuln every 15s",          color: "#c084fc", accentColor: "#9333ea", visual: "ghost_player" },
 ];
 
 // ══════════════════════════════════════════════════════════════════════
@@ -106,25 +106,25 @@ export const ASCENSION_RECIPES: AscensionRecipe[] = [
 
 export const ENEMIES: EnemyDef[] = [
   // Melee
-  { id: "crawler",     name: "Scribble",        enemyClass: "melee",  baseHp: 15,  baseDamage: 8,   baseSpeed: 2.4, xpValue: 2,   size: 12, color: "#ef4444", shape: "circle",   spawnWeight: 10, minWave: 1 },
-  { id: "charger",     name: "Doodle Bull",     enemyClass: "melee",  baseHp: 20,  baseDamage: 12,  baseSpeed: 4.5, xpValue: 4,   size: 14, color: "#f97316", shape: "triangle", spawnWeight: 6,  minWave: 3 },
-  { id: "brute",       name: "Ink Blob",        enemyClass: "melee",  baseHp: 60,  baseDamage: 20,  baseSpeed: 1.6, xpValue: 8,   size: 22, color: "#991b1b", shape: "circle",   spawnWeight: 3,  minWave: 5 },
-  { id: "swarmer",     name: "Dot",             enemyClass: "melee",  baseHp: 5,   baseDamage: 3,   baseSpeed: 4.0, xpValue: 1,   size: 7,  color: "#fda4af", shape: "circle",   spawnWeight: 15, minWave: 2 },
+  { id: "crawler",     name: "Scribble",        enemyClass: "melee",  baseHp: 15,  baseDamage: 8,   baseSpeed: 3.2, xpValue: 2,   size: 12, color: "#ef4444", shape: "circle",   visual: "male",   spawnWeight: 10, minWave: 1 },
+  { id: "charger",     name: "Doodle Bull",     enemyClass: "melee",  baseHp: 20,  baseDamage: 12,  baseSpeed: 5.5, xpValue: 4,   size: 14, color: "#f97316", shape: "triangle", visual: "beast",  spawnWeight: 6,  minWave: 3 },
+  { id: "brute",       name: "Ink Blob",        enemyClass: "melee",  baseHp: 60,  baseDamage: 20,  baseSpeed: 2.2, xpValue: 8,   size: 22, color: "#991b1b", shape: "circle",   visual: "slime",  spawnWeight: 3,  minWave: 5 },
+  { id: "swarmer",     name: "Dot",             enemyClass: "melee",  baseHp: 5,   baseDamage: 3,   baseSpeed: 5.0, xpValue: 1,   size: 7,  color: "#fda4af", shape: "circle",   visual: "spider", spawnWeight: 15, minWave: 2 },
   // Ranged
-  { id: "spitter",     name: "Sketch Archer",   enemyClass: "ranged", baseHp: 12,  baseDamage: 10,  baseSpeed: 1.8, xpValue: 3,   size: 13, color: "#22c55e", shape: "diamond",  spawnWeight: 5,  minWave: 2 },
-  { id: "sniper",      name: "Fine Liner",      enemyClass: "ranged", baseHp: 10,  baseDamage: 18,  baseSpeed: 1.3, xpValue: 5,   size: 11, color: "#a855f7", shape: "diamond",  spawnWeight: 3,  minWave: 6 },
-  { id: "turret",      name: "Pencil Tower",    enemyClass: "ranged", baseHp: 35,  baseDamage: 6,   baseSpeed: 0.0, xpValue: 6,   size: 16, color: "#6b7280", shape: "square",   spawnWeight: 2,  minWave: 8 },
+  { id: "spitter",     name: "Sketch Archer",   enemyClass: "ranged", baseHp: 12,  baseDamage: 10,  baseSpeed: 2.6, xpValue: 3,   size: 13, color: "#22c55e", shape: "diamond",  visual: "female", spawnWeight: 5,  minWave: 2 },
+  { id: "sniper",      name: "Fine Liner",      enemyClass: "ranged", baseHp: 10,  baseDamage: 18,  baseSpeed: 2.0, xpValue: 5,   size: 11, color: "#a855f7", shape: "diamond",  visual: "bird",   spawnWeight: 3,  minWave: 6 },
+  { id: "turret",      name: "Pencil Tower",    enemyClass: "ranged", baseHp: 35,  baseDamage: 6,   baseSpeed: 0.0, xpValue: 6,   size: 16, color: "#6b7280", shape: "square",   visual: "robot",  spawnWeight: 2,  minWave: 8 },
   // Casters
-  { id: "warper",      name: "Smudge",          enemyClass: "caster", baseHp: 18,  baseDamage: 14,  baseSpeed: 2.0, xpValue: 5,   size: 14, color: "#3b82f6", shape: "hexagon",  spawnWeight: 3,  minWave: 7 },
-  { id: "necromancer", name: "Dark Pen",        enemyClass: "caster", baseHp: 25,  baseDamage: 5,   baseSpeed: 1.4, xpValue: 8,   size: 16, color: "#581c87", shape: "hexagon",  spawnWeight: 2,  minWave: 9,  abilities: ["summon"] },
-  { id: "shaman",      name: "Marker Spirit",   enemyClass: "caster", baseHp: 20,  baseDamage: 8,   baseSpeed: 1.6, xpValue: 6,   size: 14, color: "#14b8a6", shape: "diamond",  spawnWeight: 2,  minWave: 10, abilities: ["buff_aura"] },
+  { id: "warper",      name: "Smudge",          enemyClass: "caster", baseHp: 18,  baseDamage: 14,  baseSpeed: 2.8, xpValue: 5,   size: 14, color: "#3b82f6", shape: "hexagon",  visual: "ghost",  spawnWeight: 3,  minWave: 7 },
+  { id: "necromancer", name: "Dark Pen",        enemyClass: "caster", baseHp: 25,  baseDamage: 5,   baseSpeed: 2.0, xpValue: 8,   size: 16, color: "#581c87", shape: "hexagon",  visual: "demon",  spawnWeight: 2,  minWave: 9,  abilities: ["summon"] },
+  { id: "shaman",      name: "Marker Spirit",   enemyClass: "caster", baseHp: 20,  baseDamage: 8,   baseSpeed: 2.2, xpValue: 6,   size: 14, color: "#14b8a6", shape: "diamond",  visual: "snake",  spawnWeight: 2,  minWave: 10, abilities: ["buff_aura"] },
   // Mini-bosses
-  { id: "siege_titan", name: "Giant Doodle",    enemyClass: "melee",  baseHp: 300, baseDamage: 25,  baseSpeed: 1.0, xpValue: 80,  size: 30, color: "#b91c1c", shape: "circle",   spawnWeight: 0,  minWave: 10, abilities: ["ground_slam", "charge", "summon_minions"] },
-  { id: "storm_witch", name: "Chaos Scribble",  enemyClass: "caster", baseHp: 200, baseDamage: 18,  baseSpeed: 2.0, xpValue: 80,  size: 26, color: "#7c3aed", shape: "hexagon",  spawnWeight: 0,  minWave: 10, abilities: ["spread_shot", "vortex", "teleport"] },
-  { id: "hive_queen",  name: "Ink Mother",      enemyClass: "caster", baseHp: 250, baseDamage: 12,  baseSpeed: 1.2, xpValue: 80,  size: 28, color: "#15803d", shape: "hexagon",  spawnWeight: 0,  minWave: 10, abilities: ["spawn_swarm", "poison_aura"] },
+  { id: "siege_titan", name: "Giant Doodle",    enemyClass: "melee",  baseHp: 300, baseDamage: 25,  baseSpeed: 1.4, xpValue: 80,  size: 30, color: "#b91c1c", shape: "circle",   visual: "demon",  spawnWeight: 0,  minWave: 10, abilities: ["ground_slam", "charge", "summon_minions"] },
+  { id: "storm_witch", name: "Chaos Scribble",  enemyClass: "caster", baseHp: 200, baseDamage: 18,  baseSpeed: 2.6, xpValue: 80,  size: 26, color: "#7c3aed", shape: "hexagon",  visual: "female", spawnWeight: 0,  minWave: 10, abilities: ["spread_shot", "vortex", "teleport"] },
+  { id: "hive_queen",  name: "Ink Mother",      enemyClass: "caster", baseHp: 250, baseDamage: 12,  baseSpeed: 1.8, xpValue: 80,  size: 28, color: "#15803d", shape: "hexagon",  visual: "spider", spawnWeight: 0,  minWave: 10, abilities: ["spawn_swarm", "poison_aura"] },
   // Bosses
-  { id: "detonator",   name: "The Eraser",      enemyClass: "melee",  baseHp: 2000,baseDamage: 30,  baseSpeed: 0.9, xpValue: 500, size: 50, color: "#dc2626", shape: "circle",   spawnWeight: 0,  minWave: 20, abilities: ["carpet_bomb", "laser_sweep", "spawn_turrets", "enrage"] },
-  { id: "void_archon", name: "The Shredder",    enemyClass: "caster", baseHp: 2500,baseDamage: 28,  baseSpeed: 1.4, xpValue: 600, size: 48, color: "#6d28d9", shape: "hexagon",  spawnWeight: 0,  minWave: 20, abilities: ["gravity_well", "clone_split", "dark_nova", "teleport"] },
+  { id: "detonator",   name: "The Eraser",      enemyClass: "melee",  baseHp: 2000,baseDamage: 30,  baseSpeed: 1.3, xpValue: 500, size: 50, color: "#dc2626", shape: "circle",   visual: "demon",  spawnWeight: 0,  minWave: 20, abilities: ["carpet_bomb", "laser_sweep", "spawn_turrets", "enrage"] },
+  { id: "void_archon", name: "The Shredder",    enemyClass: "caster", baseHp: 2500,baseDamage: 28,  baseSpeed: 1.8, xpValue: 600, size: 48, color: "#6d28d9", shape: "hexagon",  visual: "ghost",  spawnWeight: 0,  minWave: 20, abilities: ["gravity_well", "clone_split", "dark_nova", "teleport"] },
 ];
 
 export const MINIBOSS_IDS = ["siege_titan", "storm_witch", "hive_queen"];

@@ -34,6 +34,8 @@ export type UpgradeKind =
 
 // ── Data Definitions ────────────────────────────────────────────────
 
+export type CharacterVisual = "male" | "female" | "cat" | "robot" | "ghost_player";
+
 export interface CharacterDef {
   id: string;
   name: string;
@@ -44,6 +46,7 @@ export interface CharacterDef {
   passiveDesc: string;
   color: string;         // render color
   accentColor: string;
+  visual: CharacterVisual;
 }
 
 export interface WeaponDef {
@@ -84,6 +87,8 @@ export interface TokenDef {
   icon: string;          // emoji/symbol for display
 }
 
+export type EnemyVisual = "male" | "female" | "beast" | "spider" | "bird" | "slime" | "snake" | "demon" | "ghost" | "robot";
+
 export interface EnemyDef {
   id: string;
   name: string;
@@ -95,6 +100,7 @@ export interface EnemyDef {
   size: number;
   color: string;
   shape: "circle" | "triangle" | "diamond" | "square" | "hexagon";
+  visual: EnemyVisual;
   abilities?: string[];
   spawnWeight: number;   // higher = more common
   minWave: number;       // earliest wave to appear
@@ -175,6 +181,8 @@ export interface EnemyState {
   targetPlayerId?: string;
   abilityCooldowns?: Record<string, number>;
   stunMs: number;
+  speedMult: number;       // wave modifier speed multiplier
+  armor: number;           // flat damage reduction from wave modifier
 }
 
 export interface ProjectileState {
@@ -275,6 +283,7 @@ export interface GameState {
   postBoss: boolean;         // after wave 20 boss
   continueVotes: string[];   // player ids who voted
   hostId: string;
+  waveModifier?: string;     // active wave modifier label
 }
 
 // ── Level-up offer ──────────────────────────────────────────────────

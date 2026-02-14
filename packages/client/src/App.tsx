@@ -134,6 +134,7 @@ function drawPlayer(ctx: CanvasRenderingContext2D, p: PlayerState, cam: Camera, 
   const [sx, sy] = worldToScreen(p.x, p.y, cam, cw, ch);
   const charDef = getCharacter(p.characterId);
   const color = p.cosmetic.colorOverride || charDef?.color || "#38bdf8";
+  const visual = charDef?.visual || "male";
   const s = cam.scale;
 
   // Stick figure proportions
@@ -142,16 +143,22 @@ function drawPlayer(ctx: CanvasRenderingContext2D, p: PlayerState, cam: Camera, 
   const armLen = 10 * s;
   const legLen = 12 * s;
 
-  // The player position (sx, sy) maps to the hip (center of the figure)
   const isMoving = p.dx !== 0 || p.dy !== 0;
-  const walkCycle = isMoving ? tick * 0.25 : 0;
-  const armSwing = isMoving ? Math.sin(walkCycle) * 0.7 : 0;
-  const legSwing = isMoving ? Math.sin(walkCycle) * 0.8 : 0;
-  const idleBob = isMoving ? 0 : Math.sin(tick * 0.08) * 1;
+  // Improved walk cycle — use sine + cosine for natural opposing motion
+  const walkSpeed = 0.18;
+  const walkCycle = isMoving ? tick * walkSpeed : 0;
+  const idleBob = isMoving ? 0 : Math.sin(tick * 0.06) * 1.5;
+  // Bob up/down while walking
+  const walkBob = isMoving ? Math.abs(Math.sin(walkCycle * 2)) * 1.5 : 0;
 
-  const headCY = sy - bodyLen - headR + idleBob;
-  const shoulderY = sy - bodyLen * 0.7 + idleBob;
+  const headCY = sy - bodyLen - headR + idleBob - walkBob;
+  const shoulderY = sy - bodyLen * 0.7 + idleBob - walkBob;
   const hipY = sy + idleBob;
+
+  // ── Trail ──
+  if (p.cosmetic.trail && p.cosmetic.trail !== "none" && isMoving) {
+    drawTrail(ctx, sx, hipY + legLen * 0.5, p.cosmetic.trail, tick, s);
+  }
 
   // invuln glow
   if (p.invulnMs > 0) {
@@ -167,46 +174,111 @@ function drawPlayer(ctx: CanvasRenderingContext2D, p: PlayerState, cam: Camera, 
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
 
-  // Head
-  ctx.beginPath();
-  ctx.arc(sx, headCY, headR, 0, Math.PI * 2);
-  ctx.stroke();
+  if (visual === "ghost_player") {
+    // Ghost: wavy floaty shape, no legs
+    ctx.globalAlpha = 0.7;
+    ctx.beginPath();
+    ctx.arc(sx, headCY, headR * 1.2, 0, Math.PI * 2);
+    ctx.stroke();
+    // big dot eyes
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(sx - 2.5 * s, headCY - 1, 1.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(sx + 2.5 * s, headCY - 1, 1.5 * s, 0, Math.PI * 2); ctx.fill();
+    // wavy body tapers down
+    ctx.beginPath();
+    ctx.moveTo(sx - headR * 1.1, headCY + headR * 0.6);
+    for (let i = 0; i <= 6; i++) {
+      const t2 = i / 6;
+      const yy = headCY + headR + t2 * (bodyLen + legLen);
+      const wave = Math.sin(tick * 0.15 + t2 * 4) * 3 * s;
+      const taper = 1 - t2 * 0.6;
+      ctx.lineTo(sx + wave + (i % 2 === 0 ? -1 : 1) * headR * taper, yy);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  } else if (visual === "cat") {
+    // Cat: round head with ears and tail
+    ctx.beginPath(); ctx.arc(sx, headCY, headR, 0, Math.PI * 2); ctx.stroke();
+    // ears
+    ctx.beginPath(); ctx.moveTo(sx - headR * 0.7, headCY - headR * 0.4); ctx.lineTo(sx - headR * 0.3, headCY - headR * 1.4); ctx.lineTo(sx - headR * 0.0, headCY - headR * 0.5); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx + headR * 0.7, headCY - headR * 0.4); ctx.lineTo(sx + headR * 0.3, headCY - headR * 1.4); ctx.lineTo(sx + headR * 0.0, headCY - headR * 0.5); ctx.stroke();
+    // dot eyes
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(sx - 2 * s, headCY - 0.5, 1.2 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(sx + 2 * s, headCY - 0.5, 1.2 * s, 0, Math.PI * 2); ctx.fill();
+    // body + 4 legs
+    ctx.beginPath(); ctx.moveTo(sx, headCY + headR); ctx.lineTo(sx, hipY); ctx.stroke();
+    const lSwing = isMoving ? Math.sin(walkCycle) * 0.6 : 0.3;
+    // front legs
+    ctx.beginPath(); ctx.moveTo(sx, shoulderY); ctx.lineTo(sx - legLen * 0.6 * Math.sin(lSwing + 0.3), shoulderY + legLen * 0.7 * Math.cos(lSwing + 0.3)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx, shoulderY); ctx.lineTo(sx + legLen * 0.6 * Math.sin(-lSwing + 0.3), shoulderY + legLen * 0.7 * Math.cos(-lSwing + 0.3)); ctx.stroke();
+    // back legs
+    ctx.beginPath(); ctx.moveTo(sx, hipY); ctx.lineTo(sx - legLen * 0.7 * Math.sin(-lSwing + 0.3), hipY + legLen * 0.8 * Math.cos(-lSwing + 0.3)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx, hipY); ctx.lineTo(sx + legLen * 0.7 * Math.sin(lSwing + 0.3), hipY + legLen * 0.8 * Math.cos(lSwing + 0.3)); ctx.stroke();
+    // tail
+    const tailWave = Math.sin(tick * 0.12) * 0.4;
+    ctx.beginPath(); ctx.moveTo(sx, hipY); ctx.quadraticCurveTo(sx - 10 * s, hipY - 6 * s + tailWave * 10, sx - 14 * s, hipY - 10 * s); ctx.stroke();
+  } else {
+    // Standard humanoid (male/female/robot)
+    // Head
+    ctx.beginPath(); ctx.arc(sx, headCY, headR, 0, Math.PI * 2); ctx.stroke();
 
-  // Eyes (tiny dots)
-  ctx.fillStyle = color;
-  const eyeOff = p.dx > 0 ? 1.5 : p.dx < 0 ? -1.5 : 0;
-  ctx.beginPath(); ctx.arc(sx - 2 * s + eyeOff, headCY - 1, 1 * s, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.arc(sx + 2 * s + eyeOff, headCY - 1, 1 * s, 0, Math.PI * 2); ctx.fill();
+    // Hair/details based on visual
+    if (visual === "female") {
+      // longer hair lines
+      ctx.beginPath(); ctx.moveTo(sx - headR * 0.9, headCY - headR * 0.2); ctx.lineTo(sx - headR * 1.1, headCY + headR * 1.8); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(sx + headR * 0.9, headCY - headR * 0.2); ctx.lineTo(sx + headR * 1.1, headCY + headR * 1.8); ctx.stroke();
+    } else if (visual === "robot") {
+      // antenna on top
+      ctx.beginPath(); ctx.moveTo(sx, headCY - headR); ctx.lineTo(sx, headCY - headR - 5 * s); ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(sx, headCY - headR - 5 * s, 1.5 * s, 0, Math.PI * 2); ctx.fill();
+      // square jaw
+      ctx.strokeRect(sx - headR * 0.5, headCY + headR * 0.3, headR, headR * 0.5);
+    }
 
-  // Body
-  ctx.beginPath();
-  ctx.moveTo(sx, headCY + headR);
-  ctx.lineTo(sx, hipY);
-  ctx.stroke();
+    // Eyes
+    ctx.fillStyle = color;
+    const eyeOff = p.dx > 0 ? 1.5 : p.dx < 0 ? -1.5 : 0;
+    ctx.beginPath(); ctx.arc(sx - 2 * s + eyeOff, headCY - 1, 1 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(sx + 2 * s + eyeOff, headCY - 1, 1 * s, 0, Math.PI * 2); ctx.fill();
 
-  // Arms
-  // Left arm
-  ctx.beginPath();
-  ctx.moveTo(sx, shoulderY);
-  ctx.lineTo(sx - armLen * Math.cos(armSwing), shoulderY + armLen * Math.abs(Math.sin(armSwing + Math.PI / 3)));
-  ctx.stroke();
-  // Right arm
-  ctx.beginPath();
-  ctx.moveTo(sx, shoulderY);
-  ctx.lineTo(sx + armLen * Math.cos(-armSwing), shoulderY + armLen * Math.abs(Math.sin(-armSwing + Math.PI / 3)));
-  ctx.stroke();
+    // Body
+    ctx.beginPath(); ctx.moveTo(sx, headCY + headR); ctx.lineTo(sx, hipY); ctx.stroke();
 
-  // Legs
-  // Left leg
-  ctx.beginPath();
-  ctx.moveTo(sx, hipY);
-  ctx.lineTo(sx - legLen * Math.sin(legSwing + 0.35), hipY + legLen * Math.cos(legSwing + 0.35));
-  ctx.stroke();
-  // Right leg
-  ctx.beginPath();
-  ctx.moveTo(sx, hipY);
-  ctx.lineTo(sx + legLen * Math.sin(-legSwing + 0.35), hipY + legLen * Math.cos(-legSwing + 0.35));
-  ctx.stroke();
+    // Arms — natural opposing swing with bent elbows
+    const armA = isMoving ? Math.sin(walkCycle) * 0.9 : Math.sin(tick * 0.04) * 0.15;
+    const elbowBend = 0.4;
+    // Left arm
+    const laElbowX = sx - armLen * 0.5 * Math.cos(armA);
+    const laElbowY = shoulderY + armLen * 0.5;
+    ctx.beginPath(); ctx.moveTo(sx, shoulderY); ctx.lineTo(laElbowX, laElbowY); ctx.lineTo(laElbowX - armLen * 0.3 * Math.sin(armA + elbowBend), laElbowY + armLen * 0.4); ctx.stroke();
+    // Right arm
+    const raElbowX = sx + armLen * 0.5 * Math.cos(-armA);
+    const raElbowY = shoulderY + armLen * 0.5;
+    ctx.beginPath(); ctx.moveTo(sx, shoulderY); ctx.lineTo(raElbowX, raElbowY); ctx.lineTo(raElbowX + armLen * 0.3 * Math.sin(-armA + elbowBend), raElbowY + armLen * 0.4); ctx.stroke();
+
+    // Legs — proper walk with knees
+    const legA = isMoving ? Math.sin(walkCycle) * 1.0 : 0;
+    const kneeRatio = 0.55;
+    // Left leg
+    const llKneeX = sx - legLen * 0.2 * Math.sin(legA);
+    const llKneeY = hipY + legLen * kneeRatio;
+    const llFootX = sx - legLen * 0.4 * Math.sin(legA);
+    const llFootY = hipY + legLen;
+    ctx.beginPath(); ctx.moveTo(sx, hipY); ctx.lineTo(llKneeX, llKneeY); ctx.lineTo(llFootX, llFootY); ctx.stroke();
+    // Right leg
+    const rlKneeX = sx + legLen * 0.2 * Math.sin(legA);
+    const rlKneeY = hipY + legLen * kneeRatio;
+    const rlFootX = sx + legLen * 0.4 * Math.sin(legA);
+    const rlFootY = hipY + legLen;
+    ctx.beginPath(); ctx.moveTo(sx, hipY); ctx.lineTo(rlKneeX, rlKneeY); ctx.lineTo(rlFootX, rlFootY); ctx.stroke();
+
+    if (visual === "female") {
+      // small skirt triangle
+      ctx.beginPath(); ctx.moveTo(sx - 5 * s, hipY - 2 * s); ctx.lineTo(sx + 5 * s, hipY - 2 * s); ctx.lineTo(sx + 6 * s, hipY + 3 * s); ctx.lineTo(sx - 6 * s, hipY + 3 * s); ctx.closePath(); ctx.stroke();
+    }
+  }
 
   // Hat
   if (p.cosmetic.hat && p.cosmetic.hat !== "none") {
@@ -239,7 +311,31 @@ function drawPlayer(ctx: CanvasRenderingContext2D, p: PlayerState, cam: Camera, 
   ctx.fillStyle = "#fff";
   ctx.font = "10px Inter, sans-serif";
   ctx.textAlign = "center";
-  ctx.fillText(p.displayName, sx, hipY + legLen + 12 + idleBob);
+  const footY = visual === "cat" ? hipY + legLen * 0.8 + 4 : (visual === "ghost_player" ? headCY + bodyLen + legLen + 4 : hipY + legLen + 12);
+  ctx.fillText(p.displayName, sx, footY + idleBob);
+}
+
+/* ── Trail particles ── */
+function drawTrail(ctx: CanvasRenderingContext2D, sx: number, sy: number, trail: string, tick: number, s: number): void {
+  const colors: Record<string, string[]> = {
+    spark: ["#fbbf24", "#fde68a", "#fff"],
+    flame: ["#ef4444", "#f97316", "#fbbf24"],
+    ice: ["#67e8f9", "#a5f3fc", "#fff"],
+    shadow: ["#6b21a8", "#7c3aed", "#1e1b4b"],
+    rainbow: ["#ef4444", "#fbbf24", "#4ade80", "#38bdf8", "#a855f7", "#ec4899"],
+  };
+  const cols = colors[trail] ?? colors.spark;
+  for (let i = 0; i < 5; i++) {
+    const age = (tick * 0.3 + i * 1.5) % 8;
+    if (age > 5) continue;
+    ctx.globalAlpha = 0.6 - age * 0.1;
+    ctx.fillStyle = cols[i % cols.length];
+    const ox = Math.sin(tick * 0.2 + i * 2) * 4 * s;
+    const oy = age * 3 * s;
+    const r = (3 - age * 0.4) * s;
+    ctx.beginPath(); ctx.arc(sx + ox, sy + oy, Math.max(0.5, r), 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
 }
 
 function drawHat(ctx: CanvasRenderingContext2D, sx: number, sy: number, r: number, hat: string): void {
@@ -283,6 +379,7 @@ function drawEnemy(ctx: CanvasRenderingContext2D, e: EnemyState, cam: Camera, cw
   if (!def) return;
   const sc = cam.scale * (e.rank === "boss" ? 2.5 : e.rank === "miniboss" ? 1.8 : e.rank === "elite" ? 1.3 : 1);
   const s = sc * 0.8;
+  const visual = def.visual || "male";
 
   // elite/boss glow
   if (e.rank !== "normal") {
@@ -292,86 +389,237 @@ function drawEnemy(ctx: CanvasRenderingContext2D, e: EnemyState, cam: Camera, cw
     ctx.globalAlpha = 1;
   }
 
-  // Animated enemy stick figure
-  const walkAnim = Math.sin(tick * 0.2 + e.x * 0.01) * 0.5;
+  // armor shimmer
+  if (e.armor > 0) {
+    ctx.globalAlpha = 0.15 + Math.sin(tick * 0.1) * 0.05;
+    ctx.strokeStyle = "#94a3b8";
+    ctx.lineWidth = 3 * s;
+    ctx.beginPath(); ctx.arc(sx, sy - 4 * s, 12 * s, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  const walkCyc = tick * 0.18 + e.x * 0.01;
+  const walkA = Math.sin(walkCyc) * 0.8;
   const headR = 4 * s;
   const bodyLen = 10 * s;
   const armLen = 7 * s;
   const legLen = 8 * s;
-
-  const headCY = sy - bodyLen - headR;
-  const shoulderY = sy - bodyLen * 0.65;
-  const hipY = sy;
+  const walkBob = Math.abs(Math.sin(walkCyc * 2)) * 1.2;
 
   ctx.strokeStyle = def.color;
   ctx.lineWidth = Math.max(1.5, 2 * s);
   ctx.lineCap = "round";
 
-  // Head
-  ctx.beginPath();
-  ctx.arc(sx, headCY, headR, 0, Math.PI * 2);
-  ctx.stroke();
-
-  // X eyes for enemies
-  const ex = 1.5 * s;
-  ctx.lineWidth = Math.max(1, 1.5 * s);
-  // left X
-  ctx.beginPath(); ctx.moveTo(sx - 2 * s - ex * 0.4, headCY - ex * 0.4); ctx.lineTo(sx - 2 * s + ex * 0.4, headCY + ex * 0.4); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(sx - 2 * s + ex * 0.4, headCY - ex * 0.4); ctx.lineTo(sx - 2 * s - ex * 0.4, headCY + ex * 0.4); ctx.stroke();
-  // right X
-  ctx.beginPath(); ctx.moveTo(sx + 2 * s - ex * 0.4, headCY - ex * 0.4); ctx.lineTo(sx + 2 * s + ex * 0.4, headCY + ex * 0.4); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(sx + 2 * s + ex * 0.4, headCY - ex * 0.4); ctx.lineTo(sx + 2 * s - ex * 0.4, headCY + ex * 0.4); ctx.stroke();
-
-  ctx.lineWidth = Math.max(1.5, 2 * s);
-
-  // Body
-  ctx.beginPath();
-  ctx.moveTo(sx, headCY + headR);
-  ctx.lineTo(sx, hipY);
-  ctx.stroke();
-
-  // Arms - pose based on enemy class
-  if (def.enemyClass === "melee") {
-    // arms reaching forward
-    ctx.beginPath(); ctx.moveTo(sx, shoulderY); ctx.lineTo(sx - armLen * 0.3, shoulderY - armLen * 0.7); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(sx, shoulderY); ctx.lineTo(sx + armLen * 0.3, shoulderY - armLen * 0.7); ctx.stroke();
-  } else if (def.enemyClass === "ranged") {
-    // one arm aiming forward
-    ctx.beginPath(); ctx.moveTo(sx, shoulderY); ctx.lineTo(sx - armLen, shoulderY + armLen * 0.2); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(sx, shoulderY); ctx.lineTo(sx + armLen * 0.7, shoulderY - armLen * 0.5); ctx.stroke();
+  if (visual === "spider") {
+    // Spider: oval body + 8 legs
+    const bodyRx = 5 * s, bodyRy = 3 * s;
+    ctx.beginPath(); ctx.ellipse(sx, sy - 2 * s, bodyRx, bodyRy, 0, 0, Math.PI * 2); ctx.stroke();
+    // smaller head
+    ctx.beginPath(); ctx.arc(sx, sy - 2 * s - bodyRy - 2 * s, 2.5 * s, 0, Math.PI * 2); ctx.stroke();
+    // 8 legs (4 per side)
+    for (let li = 0; li < 4; li++) {
+      const ang = (li / 4) * Math.PI * 0.6 + 0.3;
+      const anim = Math.sin(walkCyc + li * 1.5) * 0.3;
+      const lx = Math.cos(ang + anim) * legLen;
+      const ly = Math.sin(ang + anim) * legLen * 0.5;
+      ctx.beginPath(); ctx.moveTo(sx - bodyRx * 0.5, sy - 2 * s); ctx.lineTo(sx - bodyRx - lx, sy - 2 * s + ly); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(sx + bodyRx * 0.5, sy - 2 * s); ctx.lineTo(sx + bodyRx + lx, sy - 2 * s + ly); ctx.stroke();
+    }
+    // fangs
+    ctx.fillStyle = def.color;
+    ctx.beginPath(); ctx.arc(sx - 1.5 * s, sy - bodyRy - 1 * s, 1 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(sx + 1.5 * s, sy - bodyRy - 1 * s, 1 * s, 0, Math.PI * 2); ctx.fill();
+  } else if (visual === "bird") {
+    // Bird: wings + beak, flap animation
+    const flapAngle = Math.sin(tick * 0.3) * 0.4;
+    // body oval
+    ctx.beginPath(); ctx.ellipse(sx, sy - 3 * s, 4 * s, 3 * s, 0, 0, Math.PI * 2); ctx.stroke();
+    // head
+    ctx.beginPath(); ctx.arc(sx + 4 * s, sy - 6 * s, 2.5 * s, 0, Math.PI * 2); ctx.stroke();
+    // beak
+    ctx.beginPath(); ctx.moveTo(sx + 6 * s, sy - 6 * s); ctx.lineTo(sx + 9 * s, sy - 5.5 * s); ctx.lineTo(sx + 6 * s, sy - 5 * s); ctx.stroke();
+    // eye
+    ctx.fillStyle = def.color;
+    ctx.beginPath(); ctx.arc(sx + 5 * s, sy - 6.5 * s, 0.8 * s, 0, Math.PI * 2); ctx.fill();
+    // wings
+    ctx.beginPath(); ctx.moveTo(sx - 1 * s, sy - 5 * s); ctx.lineTo(sx - 8 * s, sy - 9 * s - flapAngle * 10); ctx.lineTo(sx - 3 * s, sy - 4 * s); ctx.stroke();
+    // tail feathers
+    ctx.beginPath(); ctx.moveTo(sx - 3 * s, sy - 2 * s); ctx.lineTo(sx - 7 * s, sy - 1 * s); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx - 3 * s, sy - 3 * s); ctx.lineTo(sx - 7 * s, sy - 3 * s); ctx.stroke();
+  } else if (visual === "slime") {
+    // Slime: blobby shape that squishes
+    const squish = 1 + Math.sin(tick * 0.15) * 0.15;
+    const blobR = 8 * s;
+    ctx.beginPath();
+    ctx.ellipse(sx, sy - blobR * squish * 0.5, blobR / squish, blobR * squish, 0, 0, Math.PI * 2);
+    ctx.fillStyle = def.color + "40";
+    ctx.fill();
+    ctx.stroke();
+    // eyes
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(sx - 2.5 * s, sy - blobR * squish * 0.6, 1.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(sx + 2.5 * s, sy - blobR * squish * 0.6, 1.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#000";
+    ctx.beginPath(); ctx.arc(sx - 2.5 * s, sy - blobR * squish * 0.6, 0.8 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(sx + 2.5 * s, sy - blobR * squish * 0.6, 0.8 * s, 0, Math.PI * 2); ctx.fill();
+  } else if (visual === "snake") {
+    // Snake: wavy line body
+    ctx.lineWidth = Math.max(2, 3 * s);
+    ctx.beginPath();
+    ctx.moveTo(sx - 12 * s, sy);
+    for (let si = 0; si < 8; si++) {
+      const t2 = si / 8;
+      const snakeX = sx - 12 * s + t2 * 24 * s;
+      const snakeY = sy + Math.sin(tick * 0.2 + t2 * 6) * 3 * s;
+      ctx.lineTo(snakeX, snakeY);
+    }
+    ctx.stroke();
+    // head (larger circle at front)
+    ctx.lineWidth = Math.max(1.5, 2 * s);
+    ctx.beginPath(); ctx.arc(sx + 12 * s, sy, 3 * s, 0, Math.PI * 2); ctx.stroke();
+    // tongue
+    ctx.strokeStyle = "#ef4444";
+    ctx.lineWidth = 1;
+    const tongueFlick = Math.sin(tick * 0.4) * 2 * s;
+    ctx.beginPath(); ctx.moveTo(sx + 15 * s, sy); ctx.lineTo(sx + 18 * s, sy + tongueFlick); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx + 18 * s, sy + tongueFlick); ctx.lineTo(sx + 19 * s, sy + tongueFlick - 1.5 * s); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx + 18 * s, sy + tongueFlick); ctx.lineTo(sx + 19 * s, sy + tongueFlick + 1.5 * s); ctx.stroke();
+    ctx.strokeStyle = def.color;
+  } else if (visual === "ghost") {
+    // Ghost: floaty translucent body
+    ctx.globalAlpha = 0.6;
+    const ghostBob = Math.sin(tick * 0.1) * 3 * s;
+    ctx.beginPath(); ctx.arc(sx, sy - 6 * s + ghostBob, headR * 1.3, 0, Math.PI * 2); ctx.stroke();
+    // body drapes down
+    ctx.beginPath();
+    ctx.moveTo(sx - headR * 1.3, sy - 6 * s + ghostBob + headR * 0.5);
+    ctx.lineTo(sx - headR * 1.5, sy + 4 * s + ghostBob);
+    // wavy bottom
+    for (let wi = 0; wi < 5; wi++) {
+      const t2 = wi / 4;
+      ctx.lineTo(sx - headR * 1.5 + t2 * headR * 3, sy + 4 * s + ghostBob + (wi % 2 === 0 ? 3 * s : 0));
+    }
+    ctx.lineTo(sx + headR * 1.3, sy - 6 * s + ghostBob + headR * 0.5);
+    ctx.stroke();
+    // eyes
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(sx - 2 * s, sy - 7 * s + ghostBob, 1.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(sx + 2 * s, sy - 7 * s + ghostBob, 1.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+  } else if (visual === "demon") {
+    // Demon: horns + thick body + claws
+    const headCY = sy - bodyLen - headR - walkBob;
+    const shoulderY2 = sy - bodyLen * 0.65 - walkBob;
+    const hipY2 = sy;
+    ctx.lineWidth = Math.max(2, 2.5 * s);
+    ctx.beginPath(); ctx.arc(sx, headCY, headR, 0, Math.PI * 2); ctx.stroke();
+    // horns
+    ctx.beginPath(); ctx.moveTo(sx - headR * 0.6, headCY - headR * 0.5); ctx.lineTo(sx - headR, headCY - headR * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx + headR * 0.6, headCY - headR * 0.5); ctx.lineTo(sx + headR, headCY - headR * 2); ctx.stroke();
+    // angry eyes
+    ctx.fillStyle = "#ff0000";
+    ctx.beginPath(); ctx.arc(sx - 1.5 * s, headCY - 0.5 * s, 1.2 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(sx + 1.5 * s, headCY - 0.5 * s, 1.2 * s, 0, Math.PI * 2); ctx.fill();
+    // body
+    ctx.beginPath(); ctx.moveTo(sx, headCY + headR); ctx.lineTo(sx, hipY2); ctx.stroke();
+    // beefy arms with claws
+    const aSwing = Math.sin(walkCyc) * 0.5;
+    ctx.beginPath(); ctx.moveTo(sx, shoulderY2); ctx.lineTo(sx - armLen * Math.cos(aSwing), shoulderY2 + armLen * 0.8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx, shoulderY2); ctx.lineTo(sx + armLen * Math.cos(-aSwing), shoulderY2 + armLen * 0.8); ctx.stroke();
+    // legs
+    ctx.beginPath(); ctx.moveTo(sx, hipY2); ctx.lineTo(sx - legLen * 0.4 * Math.sin(walkA), hipY2 + legLen); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx, hipY2); ctx.lineTo(sx + legLen * 0.4 * Math.sin(walkA), hipY2 + legLen); ctx.stroke();
+    // tail
+    ctx.beginPath(); ctx.moveTo(sx, hipY2); ctx.quadraticCurveTo(sx + 8 * s, hipY2 + 2 * s, sx + 12 * s, hipY2 - 4 * s); ctx.stroke();
+    // arrow tip on tail
+    ctx.beginPath(); ctx.moveTo(sx + 12 * s, hipY2 - 4 * s); ctx.lineTo(sx + 11 * s, hipY2 - 7 * s); ctx.lineTo(sx + 14 * s, hipY2 - 5 * s); ctx.closePath(); ctx.fill();
+  } else if (visual === "robot") {
+    // Robot: boxy head + body
+    const bx = 5 * s, by = 7 * s;
+    ctx.strokeRect(sx - bx, sy - bodyLen - bx * 2, bx * 2, bx * 2); // head
+    ctx.strokeRect(sx - bx * 0.8, sy - bodyLen, bx * 1.6, by); // body
+    // screen eyes
+    ctx.fillStyle = "#4ade80";
+    ctx.fillRect(sx - 3 * s, sy - bodyLen - bx * 1.3, 2 * s, 1.5 * s);
+    ctx.fillRect(sx + 1 * s, sy - bodyLen - bx * 1.3, 2 * s, 1.5 * s);
+    // antenna
+    ctx.beginPath(); ctx.moveTo(sx, sy - bodyLen - bx * 2); ctx.lineTo(sx, sy - bodyLen - bx * 2 - 4 * s); ctx.stroke();
+    ctx.fillStyle = "#ef4444";
+    ctx.beginPath(); ctx.arc(sx, sy - bodyLen - bx * 2 - 4 * s, 1.5 * s, 0, Math.PI * 2); ctx.fill();
+    // arms
+    const aSwing = Math.sin(walkCyc) * 0.4;
+    ctx.beginPath(); ctx.moveTo(sx - bx * 0.8, sy - bodyLen + 2 * s); ctx.lineTo(sx - bx * 0.8 - armLen * Math.cos(aSwing), sy - bodyLen + armLen + 2 * s); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx + bx * 0.8, sy - bodyLen + 2 * s); ctx.lineTo(sx + bx * 0.8 + armLen * Math.cos(-aSwing), sy - bodyLen + armLen + 2 * s); ctx.stroke();
+    // legs
+    ctx.beginPath(); ctx.moveTo(sx - 2 * s, sy - bodyLen + by); ctx.lineTo(sx - 3 * s * Math.sin(walkA), sy - bodyLen + by + legLen); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx + 2 * s, sy - bodyLen + by); ctx.lineTo(sx + 3 * s * Math.sin(walkA), sy - bodyLen + by + legLen); ctx.stroke();
   } else {
-    // caster - arms raised
-    ctx.beginPath(); ctx.moveTo(sx, shoulderY); ctx.lineTo(sx - armLen * 0.8, shoulderY - armLen * 0.6); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(sx, shoulderY); ctx.lineTo(sx + armLen * 0.8, shoulderY - armLen * 0.6); ctx.stroke();
-  }
+    // Standard humanoid stick figure (male / female)
+    const headCY = sy - bodyLen - headR - walkBob;
+    const shoulderY2 = sy - bodyLen * 0.65 - walkBob;
+    const hipY2 = sy;
 
-  // Legs with walk animation
-  ctx.beginPath();
-  ctx.moveTo(sx, hipY);
-  ctx.lineTo(sx - legLen * Math.sin(walkAnim + 0.3), hipY + legLen * Math.cos(walkAnim + 0.3));
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(sx, hipY);
-  ctx.lineTo(sx + legLen * Math.sin(-walkAnim + 0.3), hipY + legLen * Math.cos(-walkAnim + 0.3));
-  ctx.stroke();
+    ctx.beginPath(); ctx.arc(sx, headCY, headR, 0, Math.PI * 2); ctx.stroke();
+
+    if (visual === "female") {
+      // hair lines
+      ctx.beginPath(); ctx.moveTo(sx - headR * 0.8, headCY - headR * 0.2); ctx.lineTo(sx - headR, headCY + headR * 1.5); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(sx + headR * 0.8, headCY - headR * 0.2); ctx.lineTo(sx + headR, headCY + headR * 1.5); ctx.stroke();
+    }
+
+    // X eyes
+    const ex = 1.5 * s;
+    ctx.lineWidth = Math.max(1, 1.5 * s);
+    ctx.beginPath(); ctx.moveTo(sx - 2 * s - ex * 0.4, headCY - ex * 0.4); ctx.lineTo(sx - 2 * s + ex * 0.4, headCY + ex * 0.4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx - 2 * s + ex * 0.4, headCY - ex * 0.4); ctx.lineTo(sx - 2 * s - ex * 0.4, headCY + ex * 0.4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx + 2 * s - ex * 0.4, headCY - ex * 0.4); ctx.lineTo(sx + 2 * s + ex * 0.4, headCY + ex * 0.4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx + 2 * s + ex * 0.4, headCY - ex * 0.4); ctx.lineTo(sx + 2 * s - ex * 0.4, headCY + ex * 0.4); ctx.stroke();
+    ctx.lineWidth = Math.max(1.5, 2 * s);
+
+    // body
+    ctx.beginPath(); ctx.moveTo(sx, headCY + headR); ctx.lineTo(sx, hipY2); ctx.stroke();
+
+    if (visual === "female") {
+      // skirt
+      ctx.beginPath(); ctx.moveTo(sx - 4 * s, hipY2 - 2 * s); ctx.lineTo(sx + 4 * s, hipY2 - 2 * s); ctx.lineTo(sx + 5 * s, hipY2 + 2 * s); ctx.lineTo(sx - 5 * s, hipY2 + 2 * s); ctx.closePath(); ctx.stroke();
+    }
+
+    // Arms with natural swing and bent elbows
+    const aSwing = Math.sin(walkCyc) * 0.7;
+    const elbX = armLen * 0.5;
+    ctx.beginPath(); ctx.moveTo(sx, shoulderY2); ctx.lineTo(sx - elbX * Math.cos(aSwing), shoulderY2 + elbX);
+    ctx.lineTo(sx - elbX * 0.6 * Math.sin(aSwing + 0.3), shoulderY2 + armLen * 0.9); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx, shoulderY2); ctx.lineTo(sx + elbX * Math.cos(-aSwing), shoulderY2 + elbX);
+    ctx.lineTo(sx + elbX * 0.6 * Math.sin(-aSwing + 0.3), shoulderY2 + armLen * 0.9); ctx.stroke();
+
+    // Legs with knees
+    const lA = walkA;
+    const knR = 0.55;
+    const lkX = sx - legLen * 0.2 * Math.sin(lA);
+    const lkY = hipY2 + legLen * knR;
+    ctx.beginPath(); ctx.moveTo(sx, hipY2); ctx.lineTo(lkX, lkY); ctx.lineTo(sx - legLen * 0.35 * Math.sin(lA), hipY2 + legLen); ctx.stroke();
+    const rkX = sx + legLen * 0.2 * Math.sin(lA);
+    const rkY = hipY2 + legLen * knR;
+    ctx.beginPath(); ctx.moveTo(sx, hipY2); ctx.lineTo(rkX, rkY); ctx.lineTo(sx + legLen * 0.35 * Math.sin(lA), hipY2 + legLen); ctx.stroke();
+  }
 
   // health bar
   if (e.hp < e.maxHp) {
+    const baseY = visual === "spider" ? sy - 10 * s : visual === "bird" ? sy - 10 * s : visual === "slime" ? sy - 14 * s : sy - bodyLen - headR * 2 - walkBob;
     const bw = 20 * s;
     const bx = sx - bw / 2;
-    const bTop = headCY - headR - 6;
     ctx.fillStyle = "rgba(0,0,0,0.6)";
-    ctx.fillRect(bx, bTop, bw, 3);
+    ctx.fillRect(bx, baseY, bw, 3);
     ctx.fillStyle = "#ef4444";
-    ctx.fillRect(bx, bTop, bw * Math.max(0, e.hp / e.maxHp), 3);
+    ctx.fillRect(bx, baseY, bw * Math.max(0, e.hp / e.maxHp), 3);
   }
 
-  // rank indicator
+  // rank name
   if (e.rank === "boss" || e.rank === "miniboss") {
     ctx.fillStyle = "#fff";
     ctx.font = `bold ${Math.floor(10 * s)}px Inter, sans-serif`;
     ctx.textAlign = "center";
-    ctx.fillText(def.name, sx, hipY + legLen + 12 * s);
+    ctx.fillText(def.name, sx, sy + 16 * s);
   }
 }
 
@@ -1062,6 +1310,21 @@ function HUD({ state, myId }: { state: GameState; myId: string }): JSX.Element {
           <small>Enemies</small><strong>{state.enemies.length}</strong>
         </div>
       </div>
+
+      {/* Wave modifier banner */}
+      {state.waveModifier && (
+        <div style={{
+          textAlign: "center",
+          color: "#fbbf24",
+          fontWeight: "bold",
+          fontSize: "0.85rem",
+          textShadow: "0 0 6px rgba(251,191,36,0.6)",
+          padding: "2px 0",
+          letterSpacing: "0.05em",
+        }}>
+          ⚡ {state.waveModifier} ⚡
+        </div>
+      )}
 
       {/* XP bar */}
       <div className="xp-bar-container">
