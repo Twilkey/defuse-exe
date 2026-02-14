@@ -12,7 +12,7 @@ export const BASE_XP_TO_LEVEL = 20;
 export const XP_GROWTH = 1.18;                  // each level needs 18% more
 export const BOMB_ZONE_RADIUS = 100;
 export const BOMB_ZONE_BASE_DURATION_MS = 30000;
-export const BOMB_ZONE_BASE_SPEED = 2.5;        // progress/tick solo
+export const BOMB_ZONE_BASE_SPEED = 0.35;       // progress/tick solo (~14s to fill solo)
 export const BOMB_ZONE_MULTI_BONUS = 1.8;       // multiplier per extra player
 export const BOMB_ZONE_XP_REWARD_BASE = 60;
 export const BOMB_ZONE_SPAWN_INTERVAL_MS = 90000;
@@ -43,3 +43,13 @@ export const MAX_PROJECTILES = 500;
 export const MAX_XP_GEMS = 400;
 export const MAX_BLACKLISTED_WEAPONS = 8;       // can't blacklist everything
 export const MAX_BLACKLISTED_TOKENS = 10;
+
+// Breakable objects
+export const MAX_BREAKABLES = 60;
+export const BREAKABLE_SPAWN_INTERVAL_MS = 12000; // new set spawns every 12s
+export const BREAKABLE_SPAWN_COUNT = 5;           // how many spawn per interval
+export const BREAKABLE_HP_CRATE = 15;
+export const BREAKABLE_HP_BARREL = 10;
+export const BREAKABLE_HP_CRYSTAL = 25;
+export const PICKUP_LIFETIME_MS = 15000;
+export const PICKUP_COLLECT_RANGE = 40;

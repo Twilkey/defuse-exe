@@ -16,6 +16,7 @@ import {
   type LobbyState, type LobbyPlayer, type ClientEnvelope, type ServerEnvelope,
   type PlayerWeaponState, type UpgradeDef, type CosmeticChoice,
   type GameResult, type PlayerResult, type LevelUpOffer, type WeaponDef,
+  type BreakableState, type PickupState, type PickupType,
   // constants
   TICK_RATE, TICK_MS, GAME_DURATION_MS, ARENA_W, ARENA_H, SPAWN_MARGIN,
   PLAYER_RADIUS, PICKUP_BASE_RANGE, BASE_XP_TO_LEVEL, XP_GROWTH,
@@ -28,6 +29,9 @@ import {
   CRIT_MULTIPLIER, INVULN_AFTER_HIT_MS, POST_BOSS_WAVE_INTERVAL,
   DAMAGE_NUMBER_LIFETIME, MAX_ENEMIES, MAX_PROJECTILES, MAX_XP_GEMS,
   MAX_BLACKLISTED_WEAPONS, MAX_BLACKLISTED_TOKENS,
+  MAX_BREAKABLES, BREAKABLE_SPAWN_INTERVAL_MS, BREAKABLE_SPAWN_COUNT,
+  BREAKABLE_HP_CRATE, BREAKABLE_HP_BARREL, BREAKABLE_HP_CRYSTAL,
+  PICKUP_LIFETIME_MS, PICKUP_COLLECT_RANGE,
   // data
   CHARACTERS, WEAPONS, ASCENDED_WEAPONS, TOKENS, ASCENSION_RECIPES,
   ENEMIES, MINIBOSS_IDS, BOSS_IDS,
@@ -87,6 +91,7 @@ interface GameRoom {
   weaponCooldowns: Map<string, Map<string, number>>; // playerId -> weaponId -> ticksLeft
   groupBonuses: Record<string, number>;
   nextBombZoneMs: number;
+  nextBreakableMs: number;
   waveTimer: number; // ms until next wave
   bossKilledThisRound: boolean;
   pendingLevelUps: Set<string>;
@@ -106,6 +111,7 @@ function getOrCreateRoom(roomId: string): GameRoom {
       weaponCooldowns: new Map(),
       groupBonuses: {},
       nextBombZoneMs: BOMB_ZONE_SPAWN_INTERVAL_MS / 2,
+      nextBreakableMs: 5000,
       waveTimer: 5000,
       bossKilledThisRound: false,
       pendingLevelUps: new Set(),
@@ -172,6 +178,7 @@ function startGame(room: GameRoom): void {
   room.groupBonuses = {};
   room.weaponCooldowns = new Map();
   room.nextBombZoneMs = BOMB_ZONE_SPAWN_INTERVAL_MS / 2;
+  room.nextBreakableMs = 3000;
   room.waveTimer = 3000;
   room.bossKilledThisRound = false;
   room.pendingLevelUps = new Set();
@@ -194,6 +201,8 @@ function startGame(room: GameRoom): void {
     projectiles: [],
     xpGems: [],
     bombZones: [],
+    breakables: [],
+    pickups: [],
     damageNumbers: [],
     arenaWidth: ARENA_W,
     arenaHeight: ARENA_H,
@@ -232,7 +241,7 @@ function spawnWave(room: GameRoom): void {
   // Normal enemies
   const eligible = ENEMIES.filter(e => e.minWave <= wave && e.spawnWeight > 0);
   const totalWeight = eligible.reduce((s, e) => s + e.spawnWeight, 0);
-  const enemyCount = Math.min(MAX_ENEMIES - g.enemies.length, Math.floor((8 + wave * 3) * playerCount));
+  const enemyCount = Math.min(MAX_ENEMIES - g.enemies.length, Math.floor((15 + wave * 5) * playerCount));
 
   for (let i = 0; i < enemyCount; i++) {
     let roll = Math.random() * totalWeight;
@@ -961,6 +970,159 @@ function updateBombZones(room: GameRoom): void {
   g.bombZones = g.bombZones.filter(z => z.active);
 }
 
+/* ── Breakable objects ───────────────────────────────────────────────── */
+
+function spawnBreakables(room: GameRoom): void {
+  const g = room.game!;
+  room.nextBreakableMs -= TICK_MS;
+  if (room.nextBreakableMs > 0) return;
+  room.nextBreakableMs = BREAKABLE_SPAWN_INTERVAL_MS;
+
+  for (let i = 0; i < BREAKABLE_SPAWN_COUNT && g.breakables.length < MAX_BREAKABLES; i++) {
+    const kind = pick(["crate", "barrel", "crystal"] as const);
+    const hp = kind === "crate" ? BREAKABLE_HP_CRATE : kind === "barrel" ? BREAKABLE_HP_BARREL : BREAKABLE_HP_CRYSTAL;
+    g.breakables.push({
+      id: uid(),
+      x: 100 + Math.random() * (ARENA_W - 200),
+      y: 100 + Math.random() * (ARENA_H - 200),
+      hp, maxHp: hp,
+      kind,
+    });
+  }
+}
+
+function updateBreakables(room: GameRoom): void {
+  const g = room.game!;
+
+  // Check projectile collisions with breakables
+  for (const proj of g.projectiles) {
+    if (proj.ownerId === "__enemy__") continue;
+    for (const br of g.breakables) {
+      if (br.hp <= 0) continue;
+      const d = dist(proj.x, proj.y, br.x, br.y);
+      if (d < 20 + proj.area) {
+        br.hp -= proj.damage;
+      }
+    }
+  }
+
+  // Check area/cone/orbit weapon hits via damage numbers proximity (already dealt)
+  // Breakables also take damage from players touching them
+  for (const p of g.players) {
+    if (!p.alive) continue;
+    for (const br of g.breakables) {
+      if (br.hp <= 0) continue;
+      const d = dist(p.x, p.y, br.x, br.y);
+      if (d < PLAYER_RADIUS + 20) {
+        // Melee-range auto-break (small tick damage)
+        br.hp -= 2;
+      }
+    }
+  }
+
+  // Process destroyed breakables → spawn pickups
+  const destroyed: BreakableState[] = [];
+  g.breakables = g.breakables.filter(br => {
+    if (br.hp <= 0) { destroyed.push(br); return false; }
+    return true;
+  });
+
+  for (const br of destroyed) {
+    // Always drop coins (XP gems)
+    if (g.xpGems.length < MAX_XP_GEMS) {
+      const gemCount = br.kind === "crystal" ? 3 : br.kind === "crate" ? 2 : 1;
+      for (let i = 0; i < gemCount; i++) {
+        g.xpGems.push({
+          id: uid(),
+          x: br.x + (Math.random() - 0.5) * 30,
+          y: br.y + (Math.random() - 0.5) * 30,
+          value: br.kind === "crystal" ? 8 : 4,
+        });
+      }
+    }
+
+    // Chance to drop a special pickup
+    const dropRoll = Math.random();
+    if (dropRoll < (br.kind === "crystal" ? 0.6 : 0.3)) {
+      const types: PickupType[] = ["health", "magnet", "speed_boost", "damage_boost", "bomb_charge"];
+      const weights = [30, 20, 20, 15, 15];
+      const totalW = weights.reduce((a, b) => a + b, 0);
+      let r = Math.random() * totalW;
+      let pType: PickupType = "health";
+      for (let i = 0; i < types.length; i++) {
+        r -= weights[i];
+        if (r <= 0) { pType = types[i]; break; }
+      }
+
+      const value = pType === "health" ? 30
+        : pType === "magnet" ? 5000       // ms duration
+        : pType === "speed_boost" ? 5000  // ms duration
+        : pType === "damage_boost" ? 5000 // ms duration
+        : 15; // bomb_charge: progress %
+
+      g.pickups.push({
+        id: uid(),
+        x: br.x, y: br.y,
+        pickupType: pType,
+        value,
+        lifeMs: PICKUP_LIFETIME_MS,
+      });
+    }
+  }
+}
+
+function collectPickups(room: GameRoom): void {
+  const g = room.game!;
+  const toRemove = new Set<number>();
+
+  for (const pu of g.pickups) {
+    pu.lifeMs -= TICK_MS;
+    if (pu.lifeMs <= 0) { toRemove.add(pu.id); continue; }
+
+    for (const p of g.players) {
+      if (!p.alive) continue;
+      const d = dist(p.x, p.y, pu.x, pu.y);
+      if (d < PICKUP_COLLECT_RANGE) {
+        switch (pu.pickupType) {
+          case "health":
+            p.hp = Math.min(p.maxHp, p.hp + pu.value);
+            break;
+          case "magnet":
+            // pull all XP gems close
+            for (const gem of g.xpGems) {
+              const gd = dist(p.x, p.y, gem.x, gem.y);
+              if (gd < 600) {
+                gem.x = p.x + (Math.random() - 0.5) * 30;
+                gem.y = p.y + (Math.random() - 0.5) * 30;
+              }
+            }
+            break;
+          case "speed_boost":
+            p.bonusSpeed += 0.3;
+            // temporary — we'll decay it. For simplicity, just give a flat boost
+            break;
+          case "damage_boost":
+            p.bonusDamage += 0.2;
+            break;
+          case "bomb_charge":
+            // add progress to nearest bomb zone
+            for (const zone of g.bombZones) {
+              if (zone.active) {
+                zone.progress = Math.min(100, zone.progress + pu.value);
+                break;
+              }
+            }
+            break;
+        }
+        toRemove.add(pu.id);
+        break;
+      }
+    }
+  }
+
+  g.pickups = g.pickups.filter(pu => !toRemove.has(pu.id));
+}
+
 /* ── Player death/respawn ───────────────────────────────────────────── */
 
 function checkPlayerDeath(room: GameRoom): void {
@@ -1138,6 +1300,9 @@ function tick(room: GameRoom): void {
   processDeadEnemies(room);
   collectXp(room);
   updateBombZones(room);
+  spawnBreakables(room);
+  updateBreakables(room);
+  collectPickups(room);
   checkPlayerDeath(room);
   cleanDamageNumbers(g);
 

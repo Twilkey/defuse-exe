@@ -215,6 +215,28 @@ export interface BombZoneState {
   timeLeftMs: number;
 }
 
+// ── Breakable Objects ───────────────────────────────────────────────
+
+export type PickupType = "coins" | "health" | "magnet" | "speed_boost" | "damage_boost" | "bomb_charge";
+
+export interface BreakableState {
+  id: number;
+  x: number;
+  y: number;
+  hp: number;
+  maxHp: number;
+  kind: "crate" | "barrel" | "crystal";
+}
+
+export interface PickupState {
+  id: number;
+  x: number;
+  y: number;
+  pickupType: PickupType;
+  value: number;
+  lifeMs: number;
+}
+
 export interface DamageNumber {
   x: number;
   y: number;
@@ -243,6 +265,8 @@ export interface GameState {
   projectiles: ProjectileState[];
   xpGems: XpGemState[];
   bombZones: BombZoneState[];
+  breakables: BreakableState[];
+  pickups: PickupState[];
   damageNumbers: DamageNumber[];
   arenaWidth: number;
   arenaHeight: number;
