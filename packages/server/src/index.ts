@@ -1337,6 +1337,32 @@ const clientDist = path.resolve(__dirname, "../../client/dist");
 app.use(express.static(clientDist));
 
 app.get("/health", (_req, res) => res.json({ status: "ok", game: "defuse-exe-roguelite" }));
+
+// Discord OAuth2 token exchange
+app.post("/api/token", async (req, res) => {
+  try {
+    const { code } = req.body;
+    if (!code) { res.status(400).json({ error: "missing code" }); return; }
+    const clientId = process.env.DISCORD_CLIENT_ID;
+    const clientSecret = process.env.DISCORD_CLIENT_SECRET;
+    if (!clientId || !clientSecret) { res.status(500).json({ error: "server missing discord credentials" }); return; }
+    const tokenRes = await fetch("https://discord.com/api/oauth2/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        client_id: clientId,
+        client_secret: clientSecret,
+      }),
+    });
+    const data = await tokenRes.json();
+    res.json({ access_token: (data as Record<string, unknown>).access_token });
+  } catch (err) {
+    console.error("[token exchange]", err);
+    res.status(500).json({ error: "token exchange failed" });
+  }
+});
 app.get("/", (_req, res) => {
   res.sendFile(path.join(clientDist, "index.html"), (err) => {
     if (err) res.json({ status: "DEFUSE.EXE Roguelite Server" });
@@ -1349,14 +1375,21 @@ const wss = new WebSocketServer({ server, path: "/ws" });
 wss.on("connection", (ws) => {
   let playerId = "";
   let roomId = "default";
-  const room = getOrCreateRoom(roomId);
+  let room: GameRoom | null = null;
 
   ws.on("message", (raw) => {
     let msg: ClientEnvelope;
     try { msg = JSON.parse(String(raw)); } catch { return; }
 
+    // All messages except join require a room
+    if (msg.type !== "join" && !room) return;
+    // After join is processed, room is always set; use r for convenience
+    const r = room!;
+
     switch (msg.type) {
       case "join": {
+        roomId = msg.roomId || "default";
+        room = getOrCreateRoom(roomId);
         playerId = `p-${uid()}`;
         const lp: LobbyPlayer = {
           id: playerId,
@@ -1379,44 +1412,44 @@ wss.on("connection", (ws) => {
         break;
       }
       case "lobby_update": {
-        const lp = room.lobby.players.find(p => p.id === playerId);
+        const lp = r.lobby.players.find(p => p.id === playerId);
         if (!lp) break;
         if (msg.characterId) lp.characterId = msg.characterId;
         if (msg.starterWeaponId) lp.starterWeaponId = msg.starterWeaponId;
         if (msg.cosmetic) lp.cosmetic = msg.cosmetic;
         if (msg.blacklistedWeapons) lp.blacklistedWeapons = msg.blacklistedWeapons.slice(0, MAX_BLACKLISTED_WEAPONS);
         if (msg.blacklistedTokens) lp.blacklistedTokens = msg.blacklistedTokens.slice(0, MAX_BLACKLISTED_TOKENS);
-        broadcastLobby(room);
+        broadcastLobby(r);
         break;
       }
       case "ready": {
-        const lp = room.lobby.players.find(p => p.id === playerId);
-        if (lp) { lp.ready = msg.ready; broadcastLobby(room); }
+        const lp = r.lobby.players.find(p => p.id === playerId);
+        if (lp) { lp.ready = msg.ready; broadcastLobby(r); }
         break;
       }
       case "start_game": {
-        if (playerId !== room.lobby.hostId) break;
-        if (room.game) break;
-        const allReady = room.lobby.players.length > 0 && room.lobby.players.every(p => p.ready);
+        if (playerId !== r.lobby.hostId) break;
+        if (r.game) break;
+        const allReady = r.lobby.players.length > 0 && r.lobby.players.every(p => p.ready);
         if (!allReady) {
-          const ps = room.sockets.get(playerId);
+          const ps = r.sockets.get(playerId);
           if (ps) sendTo(ps, { type: "error", message: "Not all players are ready." });
           break;
         }
-        startGame(room);
+        startGame(r);
         break;
       }
       case "input": {
-        const ps = room.sockets.get(playerId);
+        const ps = r.sockets.get(playerId);
         if (ps) { ps.inputDx = msg.dx; ps.inputDy = msg.dy; }
         break;
       }
       case "pick_upgrade": {
-        applyUpgrade(room, playerId, msg.upgradeId);
+        applyUpgrade(r, playerId, msg.upgradeId);
         break;
       }
       case "vote_continue": {
-        const g = room.game;
+        const g = r.game;
         if (!g || g.phase !== "vote_continue") break;
         if (!g.continueVotes.includes(playerId)) g.continueVotes.push(playerId);
         // check if majority voted
@@ -1424,13 +1457,13 @@ wss.on("connection", (ws) => {
           g.postBoss = true;
           g.phase = "active";
           g.timeRemainingMs = 999999999; // unlimited
-          room.waveTimer = 5000;
-          broadcastState(room);
+          r.waveTimer = 5000;
+          broadcastState(r);
         }
         break;
       }
       case "leave": {
-        const ps = room.sockets.get(playerId);
+        const ps = r.sockets.get(playerId);
         if (ps) ps.ws.close();
         break;
       }
@@ -1438,11 +1471,12 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
+    if (!room) return;
     room.lobby.players = room.lobby.players.filter(p => p.id !== playerId);
     room.sockets.delete(playerId);
     if (room.game) {
-      const p = room.game.players.find(p => p.id === playerId);
-      if (p) p.alive = false;
+      const pl = room.game.players.find(p => p.id === playerId);
+      if (pl) pl.alive = false;
     }
     if (room.lobby.players.length === 0) {
       if (room.interval) clearInterval(room.interval);

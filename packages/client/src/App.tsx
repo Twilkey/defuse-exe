@@ -16,12 +16,16 @@ import {
   HATS, TRAILS, COLOR_OVERRIDES,
   MAX_BLACKLISTED_WEAPONS, MAX_BLACKLISTED_TOKENS,
 } from "@defuse/shared";
+import { initDiscord, type DiscordSession } from "./discord.js";
 
 /* ── Networking ─────────────────────────────────────────────────────── */
 
 function normalizeUrl(raw: string | undefined): string {
-  const v = (raw ?? "http://localhost:3001").trim();
-  if (!v) return "http://localhost:3001";
+  const v = (raw ?? "").trim();
+  if (!v) {
+    // No explicit URL — derive from current page origin (works on Railway / Discord)
+    return window.location.origin;
+  }
   if (v.startsWith("http://") || v.startsWith("https://")) return v;
   return `https://${v}`;
 }
@@ -1285,60 +1289,75 @@ export function App(): JSX.Element {
 
   // WebSocket
   useEffect(() => {
-    const name = localStorage.getItem("defuse-name") || `Player-${Math.floor(Math.random() * 9999)}`;
-    localStorage.setItem("defuse-name", name);
+    let ws: WebSocket | null = null;
+    let cancelled = false;
 
-    const ws = new WebSocket(WS_URL);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      setConnected(true);
-      setStatus("Connected");
-      send({ type: "join", displayName: name } as ClientEnvelope);
-    };
-    ws.onclose = () => { setConnected(false); setStatus("Disconnected"); };
-    ws.onmessage = (e) => {
-      const msg = JSON.parse(String(e.data)) as ServerEnvelope;
-      switch (msg.type) {
-        case "joined":
-          setMyId(msg.playerId);
-          break;
-        case "lobby":
-          setLobby(msg.lobby);
-          setGameState(null);
-          setResult(null);
-          setLevelUp(null);
-          break;
-        case "state":
-          setGameState(msg.state);
-          lastGameStateRef.current = msg.state;
-          setLobby(null);
-          setResult(null);
-          if (msg.state.phase === "vote_continue") setLevelUp(null);
-          break;
-        case "level_up":
-          setLevelUp(msg.offer);
-          break;
-        case "results":
-          setResult(msg.result);
-          setGameState(null);
-          setLevelUp(null);
-          break;
-        case "boss_warning":
-          setBossWarning(msg.bossName);
-          setTimeout(() => setBossWarning(null), 3000);
-          break;
-        case "ascension":
-          setAscensionMsg(`${msg.weaponName} → ${msg.ascendedName}!`);
-          setTimeout(() => setAscensionMsg(null), 4000);
-          break;
-        case "error":
-          setStatus(msg.message);
-          break;
+    (async () => {
+      setStatus("Initializing...");
+      let session: DiscordSession;
+      try {
+        session = await initDiscord();
+      } catch (err) {
+        console.error("Discord init failed, using local mode", err);
+        const fallback = localStorage.getItem("defuse-name") || `Player-${Math.floor(Math.random() * 9999)}`;
+        localStorage.setItem("defuse-name", fallback);
+        session = { displayName: fallback, roomId: "default", isDiscord: false };
       }
-    };
+      if (cancelled) return;
 
-    return () => ws.close();
+      setStatus("Connecting...");
+      ws = new WebSocket(WS_URL);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setConnected(true);
+        setStatus("Connected");
+        send({ type: "join", displayName: session.displayName, roomId: session.roomId } as ClientEnvelope);
+      };
+      ws.onclose = () => { setConnected(false); setStatus("Disconnected"); };
+      ws.onmessage = (e) => {
+        const msg = JSON.parse(String(e.data)) as ServerEnvelope;
+        switch (msg.type) {
+          case "joined":
+            setMyId(msg.playerId);
+            break;
+          case "lobby":
+            setLobby(msg.lobby);
+            setGameState(null);
+            setResult(null);
+            setLevelUp(null);
+            break;
+          case "state":
+            setGameState(msg.state);
+            lastGameStateRef.current = msg.state;
+            setLobby(null);
+            setResult(null);
+            if (msg.state.phase === "vote_continue") setLevelUp(null);
+            break;
+          case "level_up":
+            setLevelUp(msg.offer);
+            break;
+          case "results":
+            setResult(msg.result);
+            setGameState(null);
+            setLevelUp(null);
+            break;
+          case "boss_warning":
+            setBossWarning(msg.bossName);
+            setTimeout(() => setBossWarning(null), 3000);
+            break;
+          case "ascension":
+            setAscensionMsg(`${msg.weaponName} → ${msg.ascendedName}!`);
+            setTimeout(() => setAscensionMsg(null), 4000);
+            break;
+          case "error":
+            setStatus(msg.message);
+            break;
+        }
+      };
+    })();
+
+    return () => { cancelled = true; if (ws) ws.close(); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Input

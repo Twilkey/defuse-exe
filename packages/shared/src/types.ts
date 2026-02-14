@@ -330,7 +330,7 @@ export interface LobbyState {
 // ── Network Envelopes ───────────────────────────────────────────────
 
 export type ClientEnvelope =
-  | { type: "join"; displayName: string }
+  | { type: "join"; displayName: string; roomId?: string }
   | { type: "lobby_update"; characterId?: string; starterWeaponId?: string; cosmetic?: CosmeticChoice; blacklistedWeapons?: string[]; blacklistedTokens?: string[] }
   | { type: "ready"; ready: boolean }
   | { type: "start_game" }
