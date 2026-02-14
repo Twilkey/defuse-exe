@@ -1,7 +1,7 @@
 {
   "id": "classic-core",
   "name": "Classic Core",
-  "allowedModules": ["wires", "dial", "glyph", "power"],
+  "allowedModules": ["wires", "dial", "glyph", "power", "conduit", "memory", "switches", "reactor"],
   "ruleWeights": { "core": 1.5, "spice": 1, "deception": 0.6 },
   "talkModeWeights": { "shared_pool": 0.7, "tokenized_burst": 0.2, "silence_windows": 0.08, "one_speaker_rule": 0.02 },
   "skinTheme": "industrial"

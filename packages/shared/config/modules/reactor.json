@@ -1,0 +1,10 @@
+{
+  "id": "reactor",
+  "params": {
+    "safeBand": [42, 58],
+    "stabilizeTicks": 3
+  },
+  "difficultyWeight": 1,
+  "uiHints": ["Keep heat in green zone", "Stabilize 3 times while in range"],
+  "errorPenalty": 1
+}

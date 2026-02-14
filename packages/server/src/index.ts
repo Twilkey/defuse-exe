@@ -114,6 +114,7 @@ function createEmptyState(instanceId: string): MatchState {
   return {
     instanceId,
     phase: "lobby",
+    tutorialMode: false,
     seed: dailySeed(),
     createdAtMs: now(),
     updatedAtMs: now(),
@@ -157,6 +158,7 @@ function toPublicState(state: MatchState): PublicMatchView {
   return {
     instanceId: state.instanceId,
     phase: state.phase,
+    tutorialMode: state.tutorialMode,
     seed: state.seed,
     resources: state.resources,
     voice: {
@@ -203,8 +205,9 @@ function computeTier(playerCount: number): number {
 function isModuleSolved(moduleState: BombSpec["modules"][number]): boolean {
   if (moduleState.moduleType === "wires") {
     const wires = moduleState.params.wires as Array<{ cut: boolean }>;
-    const safeWire = moduleState.params.safeWire as number;
-    return wires[safeWire]?.cut === true;
+    const safeOrder = moduleState.params.safeOrder as number[];
+    const cutProgress = Number(moduleState.params.cutProgress ?? 0);
+    return cutProgress >= safeOrder.length && safeOrder.every((index) => wires[index]?.cut === true);
   }
   if (moduleState.moduleType === "dial") {
     return moduleState.solved;
@@ -218,6 +221,25 @@ function isModuleSolved(moduleState: BombSpec["modules"][number]): boolean {
     const polarity = String(moduleState.params.polarity);
     const targetPolarity = String(moduleState.params.targetPolarity);
     return polarity === targetPolarity;
+  }
+  if (moduleState.moduleType === "conduit") {
+    const desiredLinks = moduleState.params.desiredLinks as Array<{ from: string; to: string }>;
+    const currentLinks = moduleState.params.currentLinks as Array<{ from: string; to: string }>;
+    return desiredLinks.every((desired) => currentLinks.some((current) => current.from === desired.from && current.to === desired.to));
+  }
+  if (moduleState.moduleType === "memory") {
+    const sequence = moduleState.params.sequence as number[];
+    const input = moduleState.params.input as number[];
+    return input.length === sequence.length && input.every((value, index) => value === sequence[index]);
+  }
+  if (moduleState.moduleType === "switches") {
+    const states = moduleState.params.states as number[];
+    const targetMask = moduleState.params.targetMask as number[];
+    return states.length === targetMask.length && states.every((value, index) => value === targetMask[index]);
+  }
+  if (moduleState.moduleType === "reactor") {
+    const stableTicks = Number(moduleState.params.stableTicks ?? 0);
+    return stableTicks >= 3;
   }
   return moduleState.solved;
 }
@@ -287,6 +309,7 @@ function startMatch(runtime: RuntimeInstance): void {
   runtime.tier = computeTier(players.length);
 
   state.phase = "active";
+  state.tutorialMode = false;
   state.seed = `${dailySeed()}-${Math.floor(Math.random() * 99999)}`;
   state.resources = createInitialResources(players.length, runtime.tier, configs);
   runtime.initialTalkBudget = state.resources.commsSecondsRemaining;
@@ -310,6 +333,135 @@ function startMatch(runtime: RuntimeInstance): void {
   state.result = undefined;
   runtime.startedAtMs = now();
   pushEvent(runtime, `Match started. Archetype: ${state.bomb.archetypeId}`);
+}
+
+function createTutorialBomb(seed: string, playerCount: number, level: number): BombSpec {
+  const stage = Math.max(1, Math.min(3, Math.floor(level || 1)));
+
+  const conduitModule: BombSpec["modules"][number] = {
+    id: "t-conduit",
+    moduleType: "conduit",
+    variantId: "tutorial-conduit",
+    solved: false,
+    params: {
+      fromNodes: ["A", "B", "C", "D"],
+      toNodes: ["1", "2", "3", "4"],
+      desiredLinks: [
+        { from: "A", to: "2" },
+        { from: "B", to: "4" },
+        { from: "C", to: "1" },
+        { from: "D", to: "3" }
+      ],
+      currentLinks: []
+    }
+  };
+
+  const wireModule: BombSpec["modules"][number] = {
+    id: "t-wires",
+    moduleType: "wires",
+    variantId: "tutorial-wires",
+    solved: false,
+    params: {
+      wires: [
+        { id: "w-1", color: "blue", thickness: 1, label: "L11", insulation: "basic", conduitTag: 2, inspectedProperties: [], cut: false },
+        { id: "w-2", color: "red", thickness: 3, label: "L22", insulation: "shielded", conduitTag: 4, inspectedProperties: [], cut: false },
+        { id: "w-3", color: "yellow", thickness: 2, label: "L33", insulation: "frayed", conduitTag: 1, inspectedProperties: [], cut: false },
+        { id: "w-4", color: "green", thickness: 1, label: "L44", insulation: "basic", conduitTag: 3, inspectedProperties: [], cut: false }
+      ],
+      safeOrder: [0, 1, 2],
+      cutProgress: 0
+    }
+  };
+
+  const memoryModule: BombSpec["modules"][number] = {
+    id: "t-memory",
+    moduleType: "memory",
+    variantId: "tutorial-memory",
+    solved: false,
+    params: {
+      padCount: 6,
+      sequence: [1, 4, 0, 5],
+      input: []
+    }
+  };
+
+  const reactorModule: BombSpec["modules"][number] = {
+    id: "t-reactor",
+    moduleType: "reactor",
+    variantId: "tutorial-reactor",
+    solved: false,
+    params: {
+      heat: 50,
+      safeMin: 42,
+      safeMax: 58,
+      stableTicks: 0
+    }
+  };
+
+  const modules = [conduitModule, wireModule];
+  if (stage >= 2) {
+    modules.push(memoryModule);
+  }
+  if (stage >= 3) {
+    modules.push(reactorModule);
+  }
+
+  const ruleStack = [
+    { id: "tutorial-1", description: "Route conduits first to decode wire order.", kind: "core" as const, condition: "tutorial", effect: "reveal-order" },
+    { id: "tutorial-2", description: "Cut wires in exact clue order.", kind: "core" as const, condition: "tutorial", effect: "wire-order" }
+  ];
+
+  if (stage >= 2) {
+    ruleStack.push({ id: "tutorial-3", description: "Repeat memory pulse sequence exactly.", kind: "core", condition: "tutorial", effect: "memory" });
+  }
+  if (stage >= 3) {
+    ruleStack.push({ id: "tutorial-4", description: "Stabilize reactor three times in safe band.", kind: "core", condition: "tutorial", effect: "reactor" });
+  }
+
+  return {
+    seed,
+    archetypeId: "tutorial-core",
+    difficultyTier: 1,
+    playerCount,
+    modules,
+    graph: stage >= 3 ? [{ from: "t-conduit", to: "t-wires" }, { from: "t-memory", to: "t-reactor" }] : [{ from: "t-conduit", to: "t-wires" }],
+    ruleStack,
+    modifiers: []
+  };
+}
+
+function startTutorial(runtime: RuntimeInstance, level = 1): void {
+  const state = runtime.state;
+  const players = Object.values(state.players);
+
+  state.phase = "active";
+  state.tutorialMode = true;
+  state.seed = "tutorial-seed";
+  state.resources = {
+    timerMsRemaining: 600_000,
+    commsSecondsRemaining: 999,
+    stability: 6
+  };
+  runtime.initialTalkBudget = state.resources.commsSecondsRemaining;
+  state.voice.mode = "shared_pool";
+  state.voice.speakingUsers = {};
+  state.voice.noiseGateUntilMs = undefined;
+  state.voice.silenceWindowUntilMs = undefined;
+  state.voice.overlapPenaltyArmed = true;
+
+  state.bomb = createTutorialBomb(state.seed, players.length, level);
+  runtime.briefs = generateRoleBriefs(players, state.bomb);
+  for (const [userId, brief] of Object.entries(runtime.briefs)) {
+    const player = state.players[userId];
+    if (!player) continue;
+    player.roleName = brief.roleName;
+    player.capabilities = brief.capabilities;
+    player.privateHints = [...brief.privateHints, `Tutorial stage ${Math.max(1, Math.min(3, Math.floor(level || 1)))}: follow the objective panel.`];
+  }
+
+  state.result = undefined;
+  runtime.startedAtMs = now();
+  pushEvent(runtime, "Tutorial started. Follow objective order shown in guide.");
 }
 
 function resetToLobby(runtime: RuntimeInstance): void {
@@ -408,7 +560,8 @@ function mutateAction(runtime: RuntimeInstance, userId: string, action: MatchAct
 
   if (action.type === "cut_wire" && moduleState.moduleType === "wires") {
     const wires = moduleState.params.wires as Array<{ id: string; cut: boolean }>;
-    const safeWire = Number(moduleState.params.safeWire);
+    const safeOrder = moduleState.params.safeOrder as number[];
+    const cutProgress = Number(moduleState.params.cutProgress ?? 0);
     const wireIndex = wires.findIndex((wire) => wire.id === action.wireId);
 
     if (wireIndex < 0) {
@@ -417,11 +570,23 @@ function mutateAction(runtime: RuntimeInstance, userId: string, action: MatchAct
     }
 
     wires[wireIndex].cut = true;
-    if (wireIndex !== safeWire) {
-      applyPenalty(runtime, `${player.displayName} cut the wrong wire.`, 2);
+    const expectedIndex = safeOrder[cutProgress];
+    if (wireIndex !== expectedIndex) {
+      moduleState.params.cutProgress = 0;
+      safeOrder.forEach((safeWireIndex) => {
+        if (wires[safeWireIndex]) {
+          wires[safeWireIndex].cut = false;
+        }
+      });
+      applyPenalty(runtime, `${player.displayName} broke cut order and reset the lattice.`, 2);
     } else {
-      moduleState.solved = true;
-      pushEvent(runtime, `${player.displayName} cut the safe wire.`);
+      moduleState.params.cutProgress = cutProgress + 1;
+      if (cutProgress + 1 >= safeOrder.length) {
+        moduleState.solved = true;
+        pushEvent(runtime, `${player.displayName} completed wire order.`);
+      } else {
+        pushEvent(runtime, `${player.displayName} cut wire ${cutProgress + 1}/${safeOrder.length} in correct order.`);
+      }
     }
     evaluateRound(runtime);
     return;
@@ -430,8 +595,35 @@ function mutateAction(runtime: RuntimeInstance, userId: string, action: MatchAct
   if (action.type === "reroute_wire" && moduleState.moduleType === "wires") {
     const wires = moduleState.params.wires as Array<{ cut: boolean }>;
     wires.reverse();
+    moduleState.params.cutProgress = 0;
     moduleState.lockedUntilMs = now() + 1000;
     pushEvent(runtime, `${player.displayName} rerouted wire lattice.`);
+    return;
+  }
+
+  if (action.type === "connect_conduit" && moduleState.moduleType === "conduit") {
+    const fromNodes = moduleState.params.fromNodes as string[];
+    const toNodes = moduleState.params.toNodes as string[];
+    const currentLinks = moduleState.params.currentLinks as Array<{ from: string; to: string }>;
+    if (!fromNodes.includes(action.from) || !toNodes.includes(action.to)) {
+      applyPenalty(runtime, "Invalid conduit connection.");
+      return;
+    }
+    const withoutFrom = currentLinks.filter((link) => link.from !== action.from);
+    withoutFrom.push({ from: action.from, to: action.to });
+    moduleState.params.currentLinks = withoutFrom;
+    moduleState.solved = isModuleSolved(moduleState);
+    if (moduleState.solved) {
+      pushEvent(runtime, `${player.displayName} completed conduit routing.`);
+      evaluateRound(runtime);
+    }
+    return;
+  }
+
+  if (action.type === "clear_conduits" && moduleState.moduleType === "conduit") {
+    moduleState.params.currentLinks = [];
+    moduleState.solved = false;
+    pushEvent(runtime, `${player.displayName} cleared conduit links.`);
     return;
   }
 
@@ -473,6 +665,46 @@ function mutateAction(runtime: RuntimeInstance, userId: string, action: MatchAct
     return;
   }
 
+  if (action.type === "press_memory" && moduleState.moduleType === "memory") {
+    const sequence = moduleState.params.sequence as number[];
+    const input = moduleState.params.input as number[];
+    const nextInput = [...input, action.padIndex];
+    moduleState.params.input = nextInput;
+    const expected = sequence[nextInput.length - 1];
+    if (action.padIndex !== expected) {
+      moduleState.params.input = [];
+      applyPenalty(runtime, `${player.displayName} misplayed memory pad.`);
+      return;
+    }
+    if (nextInput.length >= sequence.length) {
+      moduleState.solved = true;
+      pushEvent(runtime, `${player.displayName} solved memory matrix.`);
+      evaluateRound(runtime);
+    }
+    return;
+  }
+
+  if (action.type === "reset_memory" && moduleState.moduleType === "memory") {
+    moduleState.params.input = [];
+    pushEvent(runtime, `${player.displayName} reset memory matrix.`);
+    return;
+  }
+
+  if (action.type === "toggle_switch" && moduleState.moduleType === "switches") {
+    const states = moduleState.params.states as number[];
+    if (action.switchIndex < 0 || action.switchIndex >= states.length) {
+      applyPenalty(runtime, "Invalid switch index.");
+      return;
+    }
+    states[action.switchIndex] = states[action.switchIndex] === 1 ? 0 : 1;
+    moduleState.solved = isModuleSolved(moduleState);
+    if (moduleState.solved) {
+      pushEvent(runtime, `${player.displayName} aligned switch matrix.`);
+      evaluateRound(runtime);
+    }
+    return;
+  }
+
   if (action.type === "swap_polarity" && moduleState.moduleType === "power") {
     moduleState.params.polarity = moduleState.params.polarity === "POS" ? "NEG" : "POS";
     moduleState.solved = isModuleSolved(moduleState);
@@ -490,6 +722,38 @@ function mutateAction(runtime: RuntimeInstance, userId: string, action: MatchAct
     return;
   }
 
+  if (action.type === "adjust_reactor" && moduleState.moduleType === "reactor") {
+    const heat = Number(moduleState.params.heat ?? 50);
+    const nextHeat = Math.max(0, Math.min(100, heat + action.delta));
+    moduleState.params.heat = nextHeat;
+
+    const safeMin = Number(moduleState.params.safeMin ?? 42);
+    const safeMax = Number(moduleState.params.safeMax ?? 58);
+    if (nextHeat < safeMin - 10 || nextHeat > safeMax + 10) {
+      applyPenalty(runtime, `${player.displayName} pushed reactor into danger zone.`);
+      moduleState.params.stableTicks = 0;
+    }
+    return;
+  }
+
+  if (action.type === "stabilize_reactor" && moduleState.moduleType === "reactor") {
+    const heat = Number(moduleState.params.heat ?? 50);
+    const safeMin = Number(moduleState.params.safeMin ?? 42);
+    const safeMax = Number(moduleState.params.safeMax ?? 58);
+    if (heat >= safeMin && heat <= safeMax) {
+      moduleState.params.stableTicks = Number(moduleState.params.stableTicks ?? 0) + 1;
+      pushEvent(runtime, `${player.displayName} stabilized reactor (${moduleState.params.stableTicks}/3).`);
+      if (Number(moduleState.params.stableTicks) >= 3) {
+        moduleState.solved = true;
+        evaluateRound(runtime);
+      }
+    } else {
+      moduleState.params.stableTicks = 0;
+      applyPenalty(runtime, `${player.displayName} attempted reactor stabilize outside safe range.`);
+    }
+    return;
+  }
+
   applyPenalty(runtime, "Illegal action transition.");
 }
 
@@ -500,6 +764,7 @@ function getSpeakCount(state: MatchState): number {
 function applyVoiceTick(runtime: RuntimeInstance, deltaMs: number): void {
   const state = runtime.state;
   if (state.phase !== "active") return;
+  if (state.tutorialMode) return;
 
   state.resources.timerMsRemaining = Math.max(0, state.resources.timerMsRemaining - deltaMs);
   if (state.resources.timerMsRemaining <= 0) {
@@ -830,6 +1095,20 @@ wss.on("connection", (socket) => {
         return;
       }
       startMatch(runtime);
+      broadcastState(runtime);
+      return;
+    }
+
+    if (message.type === "start_tutorial") {
+      if (runtime.state.hostUserId !== currentUserId) {
+        sendEnvelope(socket, { type: "error", message: "Only host can start tutorial." });
+        return;
+      }
+      if (!canStart(runtime)) {
+        sendEnvelope(socket, { type: "error", message: "Lobby not ready." });
+        return;
+      }
+      startTutorial(runtime, message.level ?? 1);
       broadcastState(runtime);
       return;
     }

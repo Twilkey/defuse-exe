@@ -1,0 +1,10 @@
+{
+  "id": "switches",
+  "params": {
+    "switchCount": 6,
+    "targetComplexity": [2, 5]
+  },
+  "difficultyWeight": 1,
+  "uiHints": ["Match target mask", "Use clues from role brief"],
+  "errorPenalty": 1
+}

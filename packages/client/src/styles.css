@@ -1,7 +1,7 @@
 :root {
   color-scheme: dark;
   font-family: Inter, system-ui, sans-serif;
-  background: #0f111a;
+  background: #070b12;
   color: #f3f4f6;
 }
 
@@ -12,7 +12,10 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background: radial-gradient(circle at top, #1b2334, #0f111a 60%);
+  background:
+    radial-gradient(1000px 500px at 20% -20%, rgba(94, 234, 212, 0.25), transparent),
+    radial-gradient(1000px 500px at 80% -20%, rgba(56, 189, 248, 0.2), transparent),
+    linear-gradient(180deg, #08101d, #05080f 70%);
 }
 
 .app {
@@ -31,10 +34,11 @@ body {
 .abilities,
 .panic-feed,
 .module-card {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(8, 16, 29, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 12px;
   padding: 12px;
+  box-shadow: inset 0 0 0 1px rgba(99, 102, 241, 0.08), 0 10px 25px rgba(3, 8, 20, 0.35);
 }
 
 .topbar {
@@ -43,11 +47,22 @@ body {
   align-items: center;
 }
 
+.topbar.cue-positive {
+  border-color: rgba(74, 222, 128, 0.75);
+  box-shadow: inset 0 0 0 1px rgba(16, 185, 129, 0.2), 0 0 28px rgba(16, 185, 129, 0.35);
+}
+
+.topbar.cue-negative {
+  border-color: rgba(248, 113, 113, 0.75);
+  box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.2), 0 0 28px rgba(239, 68, 68, 0.35);
+}
+
 .status-pill {
   padding: 6px 10px;
   border-radius: 999px;
   font-weight: 700;
-  background: #3f3f46;
+  background: linear-gradient(90deg, #0ea5e9, #14b8a6);
+  color: #042131;
 }
 
 .hud {
@@ -90,12 +105,17 @@ body {
 }
 
 button {
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  background: #1f2937;
+  border: 1px solid rgba(94, 234, 212, 0.35);
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.95));
   color: #fff;
   border-radius: 8px;
   padding: 8px 10px;
   cursor: pointer;
+}
+
+button:hover {
+  border-color: rgba(56, 189, 248, 0.65);
+  transform: translateY(-1px);
 }
 
 button:disabled {
@@ -116,19 +136,231 @@ button:disabled {
 
 .wire-row {
   display: grid;
-  grid-template-columns: 1fr auto auto auto;
+  grid-template-columns: auto 1fr auto auto auto;
   gap: 6px;
   align-items: center;
 }
+
+.wire-color {
+  display: inline-block;
+  min-width: 64px;
+  text-align: center;
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-weight: 700;
+  font-size: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.wire-color[data-wire-color="red"] { background: rgba(248, 113, 113, 0.25); }
+.wire-color[data-wire-color="blue"] { background: rgba(96, 165, 250, 0.25); }
+.wire-color[data-wire-color="yellow"] { background: rgba(250, 204, 21, 0.25); }
+.wire-color[data-wire-color="green"] { background: rgba(74, 222, 128, 0.25); }
+.wire-color[data-wire-color="white"] { background: rgba(226, 232, 240, 0.25); }
 
 .dial-value {
   font-size: 32px;
   margin-bottom: 8px;
 }
 
+.dial-svg {
+  width: 120px;
+  height: 120px;
+  margin: 0 auto 8px;
+  display: block;
+}
+
+.dial-ring {
+  fill: none;
+  stroke: rgba(56, 189, 248, 0.7);
+  stroke-width: 6;
+}
+
+.dial-core {
+  fill: rgba(8, 16, 29, 0.95);
+  stroke: rgba(148, 163, 184, 0.3);
+}
+
+.dial-needle {
+  stroke: #22d3ee;
+  stroke-width: 4;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 4px rgba(34, 211, 238, 0.8));
+}
+
+.conduit-svg {
+  width: 100%;
+  max-width: 280px;
+  height: auto;
+  margin: 0 auto 10px;
+  display: block;
+}
+
+.node {
+  stroke-width: 2;
+}
+
+.node.from {
+  fill: rgba(56, 189, 248, 0.25);
+  stroke: rgba(56, 189, 248, 0.8);
+}
+
+.node.to {
+  fill: rgba(16, 185, 129, 0.25);
+  stroke: rgba(16, 185, 129, 0.8);
+}
+
+.node-text {
+  text-anchor: middle;
+  font-size: 11px;
+  fill: #cbd5e1;
+}
+
+.conduit-line {
+  stroke: #22d3ee;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-dasharray: 8 6;
+  animation: dash-flow 1.2s linear infinite;
+}
+
+.tutorial-box {
+  border-color: rgba(250, 204, 21, 0.5);
+  background: linear-gradient(180deg, rgba(71, 52, 17, 0.35), rgba(8, 16, 29, 0.72));
+}
+
+.tutorial-box p {
+  margin: 0;
+  font-weight: 600;
+  color: #fde68a;
+}
+
+.tutorial-box small {
+  display: block;
+  margin-top: 6px;
+  color: #fef3c7;
+}
+
 .observer-btn {
   margin-top: 6px;
   width: 100%;
+}
+
+.module-help {
+  margin: 4px 0 10px;
+  color: #93c5fd;
+  font-size: 13px;
+}
+
+.module-hint {
+  display: block;
+  margin-top: 8px;
+  color: #cbd5e1;
+  opacity: 0.9;
+}
+
+.sequence-strip {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.step {
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.step.on {
+  border-color: rgba(74, 222, 128, 0.8);
+  background: rgba(74, 222, 128, 0.2);
+}
+
+.conduit-grid,
+.switch-rows,
+.memory-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.conduit-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.chip {
+  border-radius: 999px;
+  min-width: 36px;
+}
+
+.chip.active {
+  background: linear-gradient(180deg, #22d3ee, #0891b2);
+  color: #00131a;
+  border-color: #67e8f9;
+}
+
+.memory-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.switch-led,
+.switch-toggle {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+}
+
+.switch-led {
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  background: rgba(30, 41, 59, 0.9);
+}
+
+.switch-led.on,
+.switch-toggle.on {
+  background: linear-gradient(180deg, #4ade80, #16a34a);
+  color: #052e16;
+  border-color: #86efac;
+}
+
+.heat-bar {
+  width: 100%;
+  height: 16px;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.heat-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #f97316, #ef4444);
+}
+
+.heat-fill.safe {
+  background: linear-gradient(90deg, #10b981, #22d3ee);
+}
+
+@keyframes dash-flow {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -28;
+  }
 }
 
 .panic-feed ul,

@@ -51,23 +51,24 @@ function getTierBucket(tier: number): string {
 function randomModuleState(rng: SeededRng, moduleType: string, moduleId: string): ModuleRuntimeState {
   if (moduleType === "wires") {
     const wiresCount = rng.int(6, 12);
-    const safeWire = rng.int(0, wiresCount - 1);
     const wires = Array.from({ length: wiresCount }, (_, index) => ({
       id: `${moduleId}-w-${index}`,
       color: rng.pick(["red", "blue", "yellow", "green", "white"]),
       thickness: rng.pick([1, 2, 3]),
       label: `L${rng.int(10, 99)}`,
       insulation: rng.pick(["basic", "shielded", "frayed"]),
+      conduitTag: rng.int(1, 4),
       inspectedProperties: [] as string[],
       cut: false
     }));
+    const safeOrder = rng.shuffle(Array.from({ length: wiresCount }, (_, index) => index)).slice(0, 3);
 
     return {
       id: moduleId,
       moduleType: "wires",
       variantId: `wires-v${rng.int(1, 5)}`,
       solved: false,
-      params: { wires, safeWire }
+      params: { wires, safeOrder, cutProgress: 0 }
     };
   }
 
@@ -99,6 +100,70 @@ function randomModuleState(rng: SeededRng, moduleType: string, moduleId: string)
     };
   }
 
+  if (moduleType === "conduit") {
+    const fromNodes = ["A", "B", "C", "D"];
+    const toNodes = ["1", "2", "3", "4"];
+    const desiredLinks = fromNodes.map((from, index) => ({ from, to: rng.shuffle(toNodes)[index] }));
+    return {
+      id: moduleId,
+      moduleType: "conduit",
+      variantId: `conduit-v${rng.int(1, 4)}`,
+      solved: false,
+      params: {
+        fromNodes,
+        toNodes,
+        desiredLinks,
+        currentLinks: []
+      }
+    };
+  }
+
+  if (moduleType === "memory") {
+    const padCount = 6;
+    const sequence = Array.from({ length: rng.int(4, 6) }, () => rng.int(0, padCount - 1));
+    return {
+      id: moduleId,
+      moduleType: "memory",
+      variantId: `memory-v${rng.int(1, 4)}`,
+      solved: false,
+      params: {
+        padCount,
+        sequence,
+        input: []
+      }
+    };
+  }
+
+  if (moduleType === "switches") {
+    const switchCount = 6;
+    const targetMask = Array.from({ length: switchCount }, () => rng.pick([0, 1]));
+    return {
+      id: moduleId,
+      moduleType: "switches",
+      variantId: `switch-v${rng.int(1, 4)}`,
+      solved: false,
+      params: {
+        states: Array.from({ length: switchCount }, () => 0),
+        targetMask
+      }
+    };
+  }
+
+  if (moduleType === "reactor") {
+    return {
+      id: moduleId,
+      moduleType: "reactor",
+      variantId: `reactor-v${rng.int(1, 4)}`,
+      solved: false,
+      params: {
+        heat: rng.int(20, 90),
+        safeMin: 42,
+        safeMax: 58,
+        stableTicks: 0
+      }
+    };
+  }
+
   return {
     id: moduleId,
     moduleType: "power",
@@ -111,6 +176,27 @@ function randomModuleState(rng: SeededRng, moduleType: string, moduleId: string)
       vented: false
     }
   };
+}
+
+function applyCrossModuleClues(modules: ModuleRuntimeState[]): void {
+  const wires = modules.find((moduleState) => moduleState.moduleType === "wires");
+  const conduit = modules.find((moduleState) => moduleState.moduleType === "conduit");
+  if (!wires || !conduit) return;
+
+  const wireList = wires.params.wires as Array<{ conduitTag: number }>;
+  const desiredLinks = conduit.params.desiredLinks as Array<{ from: string; to: string }>;
+  const targetOrder = desiredLinks.slice(0, 3).map((link) => Number(link.to));
+
+  const clueOrder: number[] = [];
+  targetOrder.forEach((target) => {
+    const index = wireList.findIndex((wire, wireIndex) => wire.conduitTag === target && !clueOrder.includes(wireIndex));
+    if (index >= 0) clueOrder.push(index);
+  });
+
+  if (clueOrder.length === 3) {
+    wires.params.safeOrder = clueOrder;
+    wires.params.cutProgress = 0;
+  }
 }
 
 function buildGraph(rng: SeededRng, moduleIds: string[], maxEdges: number): Array<{ from: string; to: string }> {
@@ -208,6 +294,8 @@ export function generateBombSpec(seed: string, playerCount: number, tier: number
     modules.map((moduleState) => moduleState.id),
     configs.balance.max_graph_edges
   );
+
+  applyCrossModuleClues(modules);
 
   const tierBucket = getTierBucket(tier);
   const ruleCounts = configs.balance.rule_count_by_tier[tierBucket];

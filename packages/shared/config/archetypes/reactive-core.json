@@ -1,7 +1,7 @@
 {
   "id": "reactive-core",
   "name": "Reactive Core",
-  "allowedModules": ["wires", "dial", "glyph", "power"],
+  "allowedModules": ["wires", "dial", "glyph", "power", "conduit", "memory", "switches", "reactor"],
   "ruleWeights": { "core": 1.2, "spice": 1.2, "deception": 0.8 },
   "talkModeWeights": { "shared_pool": 0.45, "tokenized_burst": 0.2, "silence_windows": 0.2, "one_speaker_rule": 0.15 },
   "skinTheme": "molten"

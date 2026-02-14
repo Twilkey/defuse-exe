@@ -1,0 +1,10 @@
+{
+  "id": "conduit",
+  "params": {
+    "nodes": [4, 4],
+    "crossClueStrength": [1, 3]
+  },
+  "difficultyWeight": 1,
+  "uiHints": ["Route each source to the right conduit", "Conduit outputs hint wire order"],
+  "errorPenalty": 1
+}

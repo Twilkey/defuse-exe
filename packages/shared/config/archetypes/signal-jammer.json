@@ -1,7 +1,7 @@
 {
   "id": "signal-jammer",
   "name": "Signal Jammer",
-  "allowedModules": ["wires", "dial", "glyph", "power"],
+  "allowedModules": ["wires", "dial", "glyph", "power", "conduit", "memory", "switches", "reactor"],
   "ruleWeights": { "core": 1.1, "spice": 1.4, "deception": 1.2 },
   "talkModeWeights": { "shared_pool": 0.4, "tokenized_burst": 0.2, "silence_windows": 0.25, "one_speaker_rule": 0.15 },
   "skinTheme": "neon"
