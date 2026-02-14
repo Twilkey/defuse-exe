@@ -1,0 +1,8 @@
+{
+  "id": "clockwork",
+  "name": "Clockwork",
+  "allowedModules": ["wires", "dial", "glyph", "power"],
+  "ruleWeights": { "core": 1.3, "spice": 1.1, "deception": 0.7 },
+  "talkModeWeights": { "shared_pool": 0.35, "tokenized_burst": 0.2, "silence_windows": 0.35, "one_speaker_rule": 0.1 },
+  "skinTheme": "brass"
+}

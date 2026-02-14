@@ -1,0 +1,10 @@
+{
+  "id": "power",
+  "params": {
+    "voltage": [40, 95],
+    "ventCostSeconds": 10
+  },
+  "difficultyWeight": 1,
+  "uiHints": ["Polarity gates other modules", "Vent is safer but slower"],
+  "errorPenalty": 1
+}

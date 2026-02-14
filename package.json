@@ -1,0 +1,16 @@
+{
+  "name": "defuse-exe",
+  "private": true,
+  "version": "1.0.0",
+  "description": "DEFUSE.EXE Discord Activity monorepo",
+  "workspaces": [
+    "packages/*"
+  ],
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "build": "npm run build --workspace @defuse/shared && npm run build --workspace @defuse/server && npm run build --workspace @defuse/client && npm run build --workspace @defuse/voice-bot",
+    "dev": "npm run --workspaces --if-present dev",
+    "lint": "npm run --workspaces --if-present lint",
+    "typecheck": "npm run --workspaces --if-present typecheck"
+  }
+}

@@ -1,0 +1,66 @@
+[
+  {
+    "id": "wire_blue_requires_dial",
+    "kind": "core",
+    "description": "Cutting blue is valid only if Dial is in upper half.",
+    "condition": "module.wires.cut.color=blue && module.dial.value>=5",
+    "effect": "allow",
+    "weight": 1
+  },
+  {
+    "id": "wire_thickness_order",
+    "kind": "core",
+    "description": "Cut order must follow increasing thickness.",
+    "condition": "wireCutOrder=increasingThickness",
+    "effect": "allow",
+    "weight": 1
+  },
+  {
+    "id": "dial_checksum",
+    "kind": "spice",
+    "description": "Dial safe target is seed checksum modulo ring size.",
+    "condition": "dial.value == checksum(seed)%ring",
+    "effect": "allow",
+    "weight": 1
+  },
+  {
+    "id": "dial_shift",
+    "kind": "spice",
+    "description": "Dial safe range shifts every 20 seconds.",
+    "condition": "timeWindowShift(20)",
+    "effect": "mutate:dialRange",
+    "weight": 1
+  },
+  {
+    "id": "glyph_rarity",
+    "kind": "spice",
+    "description": "Press symbols in rarity order.",
+    "condition": "sequence=rarity",
+    "effect": "allow",
+    "weight": 1
+  },
+  {
+    "id": "glyph_repeat_reverse",
+    "kind": "deception",
+    "description": "If any symbol repeats, sequence reverses.",
+    "condition": "glyph.repeat=true",
+    "effect": "reverse_sequence",
+    "weight": 0.8
+  },
+  {
+    "id": "power_neg_gate",
+    "kind": "core",
+    "description": "Power polarity must be NEG before cutting wire.",
+    "condition": "power.polarity=NEG",
+    "effect": "allow_wires",
+    "weight": 1
+  },
+  {
+    "id": "inspect_lockout",
+    "kind": "deception",
+    "description": "Inspecting locks module for 5 seconds.",
+    "condition": "action=inspect",
+    "effect": "lock_module:5000",
+    "weight": 0.5
+  }
+]

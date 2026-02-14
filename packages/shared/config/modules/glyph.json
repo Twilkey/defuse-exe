@@ -1,0 +1,10 @@
+{
+  "id": "glyph",
+  "params": {
+    "gridSize": 3,
+    "sequenceLength": [3, 5]
+  },
+  "difficultyWeight": 1,
+  "uiHints": ["Repeat means reverse", "Rarity can matter"],
+  "errorPenalty": 1
+}
