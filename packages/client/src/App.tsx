@@ -8,6 +8,7 @@ import type {
   LevelUpOffer, GameResult, UpgradeDef, CosmeticChoice,
   PlayerState, EnemyState, ProjectileState, BombZoneState,
   XpGemState, DamageNumber, BreakableState, PickupState,
+  PlayerSettings,
 } from "@defuse/shared";
 import {
   CHARACTERS, WEAPONS, TOKENS, ASCENDED_WEAPONS, ASCENSION_RECIPES,
@@ -15,6 +16,7 @@ import {
   getWeapon, getCharacter, getEnemy,
   HATS, TRAILS, COLOR_OVERRIDES,
   MAX_BLACKLISTED_WEAPONS, MAX_BLACKLISTED_TOKENS,
+  WEAPON_ASCEND_LEVEL, WEAPON_TRANSCEND_LEVEL,
 } from "@defuse/shared";
 import { initDiscord, type DiscordSession } from "./discord.js";
 
@@ -55,7 +57,7 @@ function worldToScreen(wx: number, wy: number, cam: Camera, cw: number, ch: numb
 
 function renderGame(
   ctx: CanvasRenderingContext2D, state: GameState, myId: string,
-  cw: number, ch: number
+  cw: number, ch: number, settings: PlayerSettings
 ): void {
   const me = state.players.find(p => p.id === myId);
   const cam: Camera = { x: me?.x ?? ARENA_W / 2, y: me?.y ?? ARENA_H / 2, scale: 1.0 };
@@ -107,7 +109,7 @@ function renderGame(
 
   // projectiles
   for (const proj of state.projectiles) {
-    drawProjectile(ctx, proj, cam, cw, ch);
+    drawProjectile(ctx, proj, cam, cw, ch, myId, settings);
   }
 
   // enemies
@@ -143,7 +145,7 @@ function drawPlayer(ctx: CanvasRenderingContext2D, p: PlayerState, cam: Camera, 
   const armLen = 10 * s;
   const legLen = 12 * s;
 
-  const isMoving = p.dx !== 0 || p.dy !== 0;
+  const isMoving = p.moving;
   // Improved walk cycle — use sine + cosine for natural opposing motion
   const walkSpeed = 0.18;
   const walkCycle = isMoving ? tick * walkSpeed : 0;
@@ -623,14 +625,21 @@ function drawEnemy(ctx: CanvasRenderingContext2D, e: EnemyState, cam: Camera, cw
   }
 }
 
-function drawProjectile(ctx: CanvasRenderingContext2D, p: ProjectileState, cam: Camera, cw: number, ch: number): void {
+function drawProjectile(ctx: CanvasRenderingContext2D, p: ProjectileState, cam: Camera, cw: number, ch: number, myId: string, settings: PlayerSettings): void {
   const [sx, sy] = worldToScreen(p.x, p.y, cam, cw, ch);
   const size = Math.max(3, p.area * 0.5 * cam.scale);
+
+  // Apply opacity settings
+  const isOwn = p.ownerId === myId;
+  const isEnemy = p.ownerId === "__enemy__";
+  if (!isEnemy) {
+    ctx.globalAlpha = isOwn ? settings.ownProjectileOpacity : settings.otherProjectileOpacity;
+  }
 
   if (p.pattern === "ring") {
     ctx.strokeStyle = p.color;
     ctx.lineWidth = 2;
-    ctx.globalAlpha = 0.6;
+    ctx.globalAlpha *= 0.6;
     ctx.beginPath(); ctx.arc(sx, sy, p.area * cam.scale, 0, Math.PI * 2); ctx.stroke();
     ctx.globalAlpha = 1;
     return;
@@ -638,27 +647,165 @@ function drawProjectile(ctx: CanvasRenderingContext2D, p: ProjectileState, cam: 
 
   if (p.pattern === "ground") {
     ctx.fillStyle = p.color;
-    ctx.globalAlpha = 0.3;
-    ctx.beginPath(); ctx.arc(sx, sy, p.area * cam.scale, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha *= 0.3;
+    // Splatter pattern (irregular blobs)
+    for (let i = 0; i < 5; i++) {
+      const ox = Math.sin(p.x * 3 + i * 1.7) * p.area * 0.4 * cam.scale;
+      const oy = Math.cos(p.y * 3 + i * 2.3) * p.area * 0.4 * cam.scale;
+      const r = (0.3 + Math.sin(i * 5) * 0.2) * p.area * cam.scale;
+      ctx.beginPath(); ctx.arc(sx + ox, sy + oy, Math.max(2, r), 0, Math.PI * 2); ctx.fill();
+    }
     ctx.globalAlpha = 1;
     return;
   }
 
   if (p.pattern === "beam") {
+    // Highlighter beam — thick, semi-transparent with glow
+    const endX = sx + p.dx * 300 * cam.scale;
+    const endY = sy + p.dy * 300 * cam.scale;
     ctx.strokeStyle = p.color;
+    ctx.lineWidth = 6;
+    ctx.globalAlpha *= 0.3;
+    ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(endX, endY); ctx.stroke();
     ctx.lineWidth = 3;
-    ctx.globalAlpha = 0.8;
+    ctx.globalAlpha = (isOwn ? settings.ownProjectileOpacity : settings.otherProjectileOpacity) * 0.8;
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(endX, endY); ctx.stroke();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "#fff";
+    ctx.globalAlpha = (isOwn ? settings.ownProjectileOpacity : settings.otherProjectileOpacity) * 0.4;
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(endX, endY); ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.lineCap = "butt";
+    return;
+  }
+
+  // Enemy projectile — spiky ink blob
+  if (isEnemy) {
+    ctx.fillStyle = "#ff6666";
+    ctx.strokeStyle = "#cc3333";
+    ctx.lineWidth = 1;
+    const spikes = 6;
     ctx.beginPath();
-    ctx.moveTo(sx, sy);
-    ctx.lineTo(sx + p.dx * 300 * cam.scale, sy + p.dy * 300 * cam.scale);
-    ctx.stroke();
+    for (let i = 0; i <= spikes; i++) {
+      const a = (i / spikes) * Math.PI * 2;
+      const r = i % 2 === 0 ? size * 1.2 : size * 0.6;
+      const px = sx + Math.cos(a) * r;
+      const py = sy + Math.sin(a) * r;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath(); ctx.fill(); ctx.stroke();
     ctx.globalAlpha = 1;
     return;
   }
 
-  // default dot
-  ctx.fillStyle = p.ownerId === "__enemy__" ? "#ff6666" : p.color;
-  ctx.beginPath(); ctx.arc(sx, sy, size, 0, Math.PI * 2); ctx.fill();
+  // Player projectile — stick-figure themed shapes based on weapon pattern
+  const angle = Math.atan2(p.dy, p.dx);
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate(angle);
+
+  if (p.pattern === "orbit") {
+    // Paper plane shape
+    const s = size * 1.3;
+    ctx.fillStyle = p.color;
+    ctx.strokeStyle = p.color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(s, 0);
+    ctx.lineTo(-s * 0.7, -s * 0.6);
+    ctx.lineTo(-s * 0.3, 0);
+    ctx.lineTo(-s * 0.7, s * 0.6);
+    ctx.closePath();
+    ctx.fill();
+    // fold line
+    ctx.beginPath();
+    ctx.moveTo(s, 0);
+    ctx.lineTo(-s * 0.3, 0);
+    ctx.strokeStyle = "#ffffff40";
+    ctx.stroke();
+  } else if (p.pattern === "cone") {
+    // Crayon streak — tapered colored shape
+    const s = size * 1.5;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.moveTo(s, 0);
+    ctx.lineTo(-s * 0.5, -s * 0.4);
+    ctx.quadraticCurveTo(-s * 0.8, 0, -s * 0.5, s * 0.4);
+    ctx.closePath();
+    ctx.fill();
+    // Crayon tip
+    ctx.fillStyle = "#00000030";
+    ctx.beginPath();
+    ctx.moveTo(s, 0);
+    ctx.lineTo(s * 0.5, -s * 0.15);
+    ctx.lineTo(s * 0.5, s * 0.15);
+    ctx.closePath();
+    ctx.fill();
+  } else if (p.pattern === "chain") {
+    // Staple shape
+    const s = size * 0.8;
+    ctx.strokeStyle = p.color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-s, -s * 0.8);
+    ctx.lineTo(-s, 0);
+    ctx.lineTo(s, 0);
+    ctx.lineTo(s, -s * 0.8);
+    ctx.stroke();
+  } else if (p.pattern === "homing") {
+    // Dart shape — pointed with fins
+    const s = size * 1.2;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.moveTo(s, 0);
+    ctx.lineTo(-s * 0.4, -s * 0.3);
+    ctx.lineTo(-s * 0.2, 0);
+    ctx.lineTo(-s * 0.4, s * 0.3);
+    ctx.closePath();
+    ctx.fill();
+    // Fins
+    ctx.fillStyle = p.color + "80";
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.2, 0);
+    ctx.lineTo(-s * 0.8, -s * 0.5);
+    ctx.lineTo(-s * 0.4, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.2, 0);
+    ctx.lineTo(-s * 0.8, s * 0.5);
+    ctx.lineTo(-s * 0.4, 0);
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    // Default: pencil shape (projectile / area)
+    const s = size * 1.4;
+    ctx.fillStyle = p.color;
+    // Pencil body
+    ctx.beginPath();
+    ctx.moveTo(s, 0);
+    ctx.lineTo(s * 0.4, -s * 0.25);
+    ctx.lineTo(-s * 0.6, -s * 0.25);
+    ctx.lineTo(-s * 0.6, s * 0.25);
+    ctx.lineTo(s * 0.4, s * 0.25);
+    ctx.closePath();
+    ctx.fill();
+    // Pencil tip
+    ctx.fillStyle = "#fde68a";
+    ctx.beginPath();
+    ctx.moveTo(s, 0);
+    ctx.lineTo(s * 0.4, -s * 0.25);
+    ctx.lineTo(s * 0.4, s * 0.25);
+    ctx.closePath();
+    ctx.fill();
+    // Eraser end
+    ctx.fillStyle = "#f472b6";
+    ctx.fillRect(-s * 0.6, -s * 0.25, s * 0.2, s * 0.5);
+  }
+
+  ctx.restore();
+  ctx.globalAlpha = 1;
 }
 
 function drawXpGem(ctx: CanvasRenderingContext2D, gem: XpGemState, cam: Camera, cw: number, ch: number): void {
@@ -1152,23 +1299,27 @@ function LobbyScreen({
 /* ── HUD ────────────────────────────────────────────────────────────── */
 
 function WeaponInspectPanel({ ws, player, onClose }: {
-  ws: { weaponId: string; level: number; ascended: boolean };
+  ws: { weaponId: string; level: number; ascended: boolean; transcended: boolean };
   player: PlayerState;
   onClose: () => void;
 }): JSX.Element {
   const wDef = getWeapon(ws.weaponId);
   if (!wDef) return <div className="inspect-panel"><p>Unknown weapon</p><button className="sm-btn" onClick={onClose}>Close</button></div>;
 
-  const lvlMult = 1 + (ws.level - 1) * 0.2;
-  const curDamage = Math.floor(wDef.baseDamage * lvlMult * (1 + player.bonusDamage));
-  const curArea = Math.floor(wDef.baseArea * (1 + player.bonusArea));
-  const curProj = wDef.baseProjectiles + Math.floor(player.bonusProjectiles);
-  const curPierce = wDef.basePierce + Math.floor(player.bonusPierce);
-  const curCd = Math.max(50, Math.floor(wDef.baseCooldownMs * (1 / (1 + player.bonusAttackSpeed))));
+  const lvlMult = 1 + (ws.level - 1) * 0.08;
+  const transcendMult = ws.transcended ? 1.5 : 1;
+  const curDamage = Math.floor(wDef.baseDamage * lvlMult * transcendMult * (1 + player.bonusDamage));
+  const curArea = Math.floor(wDef.baseArea * (1 + player.bonusArea) * (ws.transcended ? 1.25 : 1));
+  const curProj = wDef.baseProjectiles + Math.floor(player.bonusProjectiles) + (ws.transcended ? 2 : 0);
+  const curPierce = wDef.basePierce + Math.floor(player.bonusPierce) + (ws.transcended ? 3 : 0);
+  const curCd = Math.max(50, Math.floor(wDef.baseCooldownMs * (1 / (1 + player.bonusAttackSpeed)) * (ws.transcended ? 0.8 : 1)));
 
   const recipe = ASCENSION_RECIPES.find(r => r.weaponId === ws.weaponId || r.ascendedWeaponId === ws.weaponId);
   const matchToken = recipe ? TOKENS.find(t => t.id === recipe.tokenId) : null;
   const hasToken = matchToken ? player.tokens.includes(matchToken.id) : false;
+
+  const nextMilestone = !ws.ascended ? WEAPON_ASCEND_LEVEL : WEAPON_TRANSCEND_LEVEL;
+  const milestoneLabel = !ws.ascended ? "Ascension" : "Transcendence";
 
   const stat = (label: string, base: number, cur: number) => (
     <div className="inspect-stat">
@@ -1183,7 +1334,7 @@ function WeaponInspectPanel({ ws, player, onClose }: {
       <div className="inspect-header">
         <span className="w-dot" style={{ background: wDef.color }} />
         <strong>{wDef.name}</strong>
-        <small>Lv{ws.level}{ws.ascended ? " ★" : ""}</small>
+        <small>Lv{ws.level}{ws.transcended ? " ✦" : ws.ascended ? " ★" : ""}</small>
         <button className="inspect-close" onClick={onClose}>✕</button>
       </div>
       <p className="inspect-desc">{wDef.description}</p>
@@ -1197,16 +1348,34 @@ function WeaponInspectPanel({ ws, player, onClose }: {
           <span className="inspect-label">Pattern</span>
           <span className="inspect-base">{wDef.pattern}</span>
         </div>
+        <div className="inspect-stat">
+          <span className="inspect-label">Progress</span>
+          <span className="inspect-base">{ws.level}/{nextMilestone}</span>
+        </div>
       </div>
+      {ws.transcended && (
+        <div className="inspect-ascension" style={{ borderColor: "#c084fc" }}>
+          <strong style={{ color: "#c084fc" }}>✦ TRANSCENDED ✦</strong>
+          <p style={{ color: "#d4d4d8" }}>+50% damage, +25% area, +2 projectiles, +3 pierce, -20% cooldown</p>
+        </div>
+      )}
       {recipe && !ws.ascended && (
         <div className="inspect-ascension">
-          <strong>Ascension</strong>
+          <strong>{milestoneLabel}</strong>
           <p>
-            Requires: <span className={ws.level >= 5 ? "green" : "red"}>Lv5 ({ws.level}/5)</span>
+            Requires: <span className={ws.level >= WEAPON_ASCEND_LEVEL ? "green" : "red"}>Lv{WEAPON_ASCEND_LEVEL} ({ws.level}/{WEAPON_ASCEND_LEVEL})</span>
             {" + "}
             <span className={hasToken ? "green" : "red"}>{matchToken?.icon} {matchToken?.name ?? recipe.tokenId}</span>
           </p>
-          {ws.level >= 5 && hasToken && <span className="ascension-ready">✦ READY TO ASCEND</span>}
+          {ws.level >= WEAPON_ASCEND_LEVEL && hasToken && <span className="ascension-ready">✦ READY TO ASCEND</span>}
+        </div>
+      )}
+      {ws.ascended && !ws.transcended && (
+        <div className="inspect-ascension" style={{ borderColor: "#c084fc" }}>
+          <strong style={{ color: "#c084fc" }}>Transcendence</strong>
+          <p>
+            Reach <span className={ws.level >= WEAPON_TRANSCEND_LEVEL ? "green" : "red"}>Lv{WEAPON_TRANSCEND_LEVEL} ({ws.level}/{WEAPON_TRANSCEND_LEVEL})</span> to transcend
+          </p>
         </div>
       )}
     </div>
@@ -1242,7 +1411,7 @@ function TokenInspectPanel({ tokenId, onClose }: { tokenId: string; onClose: () 
       {recipe && matchWeapon && (
         <div className="inspect-ascension">
           <strong>Ascends with</strong>
-          <p><span className="w-dot" style={{ background: matchWeapon.color }} /> {matchWeapon.name} at Lv5</p>
+          <p><span className="w-dot" style={{ background: matchWeapon.color }} /> {matchWeapon.name} at Lv{WEAPON_ASCEND_LEVEL}</p>
         </div>
       )}
     </div>
@@ -1286,9 +1455,10 @@ function PlayerInspectPanel({ player, onClose }: { player: PlayerState; onClose:
 
 function HUD({ state, myId }: { state: GameState; myId: string }): JSX.Element {
   const me = state.players.find(p => p.id === myId);
-  const mins = Math.floor(state.timeRemainingMs / 60000);
-  const secs = Math.floor((state.timeRemainingMs % 60000) / 1000);
-  const [inspectWeapon, setInspectWeapon] = useState<{ weaponId: string; level: number; ascended: boolean } | null>(null);
+  const elapsed = state.elapsedMs ?? 0;
+  const eMins = Math.floor(elapsed / 60000);
+  const eSecs = Math.floor((elapsed % 60000) / 1000);
+  const [inspectWeapon, setInspectWeapon] = useState<{ weaponId: string; level: number; ascended: boolean; transcended: boolean } | null>(null);
   const [inspectToken, setInspectToken] = useState<string | null>(null);
   const [inspectPlayer, setInspectPlayer] = useState<string | null>(null);
   const otherPlayers = state.players.filter(p => p.id !== myId);
@@ -1298,10 +1468,7 @@ function HUD({ state, myId }: { state: GameState; myId: string }): JSX.Element {
     <div className="hud-overlay">
       <div className="hud-top">
         <div className="hud-stat">
-          <small>Wave</small><strong>{state.wave}</strong>
-        </div>
-        <div className="hud-stat">
-          <small>Time</small><strong>{state.postBoss ? "∞" : `${mins}:${secs.toString().padStart(2, "0")}`}</strong>
+          <small>Time</small><strong>{eMins}:{eSecs.toString().padStart(2, "0")}</strong>
         </div>
         <div className="hud-stat">
           <small>Level</small><strong>{state.sharedLevel}</strong>
@@ -1309,22 +1476,10 @@ function HUD({ state, myId }: { state: GameState; myId: string }): JSX.Element {
         <div className="hud-stat">
           <small>Enemies</small><strong>{state.enemies.length}</strong>
         </div>
-      </div>
-
-      {/* Wave modifier banner */}
-      {state.waveModifier && (
-        <div style={{
-          textAlign: "center",
-          color: "#fbbf24",
-          fontWeight: "bold",
-          fontSize: "0.85rem",
-          textShadow: "0 0 6px rgba(251,191,36,0.6)",
-          padding: "2px 0",
-          letterSpacing: "0.05em",
-        }}>
-          ⚡ {state.waveModifier} ⚡
+        <div className="hud-stat">
+          <small>Kills</small><strong>{me?.killCount ?? 0}</strong>
         </div>
-      )}
+      </div>
 
       {/* XP bar */}
       <div className="xp-bar-container">
@@ -1345,7 +1500,7 @@ function HUD({ state, myId }: { state: GameState; myId: string }): JSX.Element {
               return (
                 <div
                   key={ws.weaponId}
-                  className={`weapon-slot ${ws.ascended ? "ascended" : ""} clickable`}
+                  className={`weapon-slot ${ws.transcended ? "transcended" : ws.ascended ? "ascended" : ""} clickable`}
                   onClick={() => setInspectWeapon(inspectWeapon?.weaponId === ws.weaponId ? null : ws)}
                 >
                   <span className="w-dot" style={{ background: wDef?.color ?? "#fff" }} />
@@ -1472,7 +1627,7 @@ function ResultsScreen({ result, send }: { result: GameResult; send: (e: ClientE
       <h1 className={result.outcome === "victory" ? "victory-title" : "defeat-title"}>
         {result.outcome === "victory" ? "MISSION COMPLETE" : "MISSION FAILED"}
       </h1>
-      <p>Wave {result.wave} · {Math.floor(result.timeElapsedMs / 60000)}m {Math.floor((result.timeElapsedMs % 60000) / 1000)}s</p>
+      <p>Survived {Math.floor(result.timeElapsedMs / 60000)}m {Math.floor((result.timeElapsedMs % 60000) / 1000)}s</p>
 
       {/* Podium */}
       {podiumPlayers.length > 0 && (
@@ -1524,6 +1679,72 @@ function ResultsScreen({ result, send }: { result: GameResult; send: (e: ClientE
    Main App
    ═══════════════════════════════════════════════════════════════════════ */
 
+/* ── Settings Modal ─────────────────────────────────────────────────── */
+
+function SettingsModal({ settings, onChange, onClose }: {
+  settings: PlayerSettings;
+  onChange: (s: PlayerSettings) => void;
+  onClose: () => void;
+}): JSX.Element {
+  return (
+    <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal settings-modal">
+        <h2>Settings</h2>
+
+        <div className="settings-group">
+          <label>Your Projectile Opacity: {Math.round(settings.ownProjectileOpacity * 100)}%</label>
+          <input
+            type="range" min="10" max="100" step="5"
+            value={settings.ownProjectileOpacity * 100}
+            onChange={e => onChange({ ...settings, ownProjectileOpacity: Number(e.target.value) / 100 })}
+          />
+        </div>
+
+        <div className="settings-group">
+          <label>Other Players' Projectile Opacity: {Math.round(settings.otherProjectileOpacity * 100)}%</label>
+          <input
+            type="range" min="0" max="100" step="5"
+            value={settings.otherProjectileOpacity * 100}
+            onChange={e => onChange({ ...settings, otherProjectileOpacity: Number(e.target.value) / 100 })}
+          />
+        </div>
+
+        <div className="settings-group">
+          <label>Targeting Mode</label>
+          <div className="row" style={{ gap: "8px", marginTop: "4px" }}>
+            <button
+              className={settings.targetingMode === "closest" ? "sm-btn selected" : "sm-btn"}
+              onClick={() => onChange({ ...settings, targetingMode: "closest" })}
+            >Closest Enemy</button>
+            <button
+              className={settings.targetingMode === "cursor" ? "sm-btn selected" : "sm-btn"}
+              onClick={() => onChange({ ...settings, targetingMode: "cursor" })}
+            >Cursor Aim</button>
+          </div>
+        </div>
+
+        <button className="big-btn" onClick={onClose} style={{ marginTop: "16px" }}>Close</button>
+      </div>
+    </div>
+  );
+}
+
+/* ── Pause Menu ─────────────────────────────────────────────────────── */
+
+function PauseMenu({ onResume, onSettings }: { onResume: () => void; onSettings: () => void }): JSX.Element {
+  return (
+    <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onResume(); }}>
+      <div className="modal pause-modal">
+        <h2>PAUSED</h2>
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginTop: "16px" }}>
+          <button className="big-btn accent" onClick={onResume}>Resume</button>
+          <button className="big-btn" onClick={onSettings}>Settings</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function App(): JSX.Element {
   const [connected, setConnected] = useState(false);
   const [myId, setMyId] = useState("");
@@ -1533,17 +1754,33 @@ export function App(): JSX.Element {
   const [result, setResult] = useState<GameResult | null>(null);
   const [bossWarning, setBossWarning] = useState<string | null>(null);
   const [ascensionMsg, setAscensionMsg] = useState<string | null>(null);
+  const [transcendMsg, setTranscendMsg] = useState<string | null>(null);
   const [status, setStatus] = useState("Connecting...");
+  const [showPause, setShowPause] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settings, setSettings] = useState<PlayerSettings>({
+    ownProjectileOpacity: 1,
+    otherProjectileOpacity: 0.7,
+    targetingMode: "closest",
+  });
   const wsRef = useRef<WebSocket | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animRef = useRef<number>(0);
   const lastGameStateRef = useRef<GameState | null>(null);
+  const cursorWorldRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
 
   const send = useCallback((env: ClientEnvelope) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(env));
     }
   }, []);
+
+  const handleSettingsChange = useCallback((newSettings: PlayerSettings) => {
+    setSettings(newSettings);
+    send({ type: "update_settings", settings: newSettings });
+  }, [send]);
 
   // WebSocket
   useEffect(() => {
@@ -1611,6 +1848,10 @@ export function App(): JSX.Element {
             setAscensionMsg(`${msg.weaponName} → ${msg.ascendedName}!`);
             setTimeout(() => setAscensionMsg(null), 4000);
             break;
+          case "transcendence":
+            setTranscendMsg(`${msg.weaponName} TRANSCENDED!`);
+            setTimeout(() => setTranscendMsg(null), 4000);
+            break;
           case "error":
             setStatus(msg.message);
             break;
@@ -1621,25 +1862,52 @@ export function App(): JSX.Element {
     return () => { cancelled = true; if (ws) ws.close(); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Input
+  // Input + cursor tracking + ESC key
   useEffect(() => {
-    const handleDown = (e: KeyboardEvent) => keysDown.add(e.key.toLowerCase());
+    const handleDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (showSettings) { setShowSettings(false); return; }
+        setShowPause(prev => !prev);
+        return;
+      }
+      keysDown.add(e.key.toLowerCase());
+    };
     const handleUp = (e: KeyboardEvent) => keysDown.delete(e.key.toLowerCase());
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const canvas = canvasRef.current;
+      const state = lastGameStateRef.current;
+      if (!canvas || !state) return;
+      const me = state.players.find(p => p.id === myId);
+      if (!me) return;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my2 = e.clientY - rect.top;
+      // Convert screen coords back to world coords
+      cursorWorldRef.current = {
+        x: me.x + (mx - canvas.clientWidth / 2),
+        y: me.y + (my2 - canvas.clientHeight / 2),
+      };
+    };
+
     window.addEventListener("keydown", handleDown);
     window.addEventListener("keyup", handleUp);
+    window.addEventListener("mousemove", handleMouseMove);
 
     const inputLoop = setInterval(() => {
       if (!gameState || gameState.phase !== "active") return;
       const v = inputVector();
-      send({ type: "input", dx: v.dx, dy: v.dy });
+      const cursor = cursorWorldRef.current;
+      send({ type: "input", dx: v.dx, dy: v.dy, cursorX: cursor.x, cursorY: cursor.y });
     }, 50);
 
     return () => {
       window.removeEventListener("keydown", handleDown);
       window.removeEventListener("keyup", handleUp);
+      window.removeEventListener("mousemove", handleMouseMove);
       clearInterval(inputLoop);
     };
-  }, [gameState, send]);
+  }, [gameState, send, myId, showSettings]);
 
   // Canvas render loop
   useEffect(() => {
@@ -1651,7 +1919,7 @@ export function App(): JSX.Element {
         if (ctx) {
           canvas.width = canvas.clientWidth;
           canvas.height = canvas.clientHeight;
-          renderGame(ctx, state, myId, canvas.width, canvas.height);
+          renderGame(ctx, state, myId, canvas.width, canvas.height, settingsRef.current);
         }
       }
       animRef.current = requestAnimationFrame(frame);
@@ -1678,6 +1946,21 @@ export function App(): JSX.Element {
       {levelUp && <LevelUpModal offer={levelUp} send={send} onClose={() => setLevelUp(null)} />}
       {gameState?.phase === "vote_continue" && <VoteContinueModal state={gameState} send={send} />}
 
+      {showPause && !showSettings && (
+        <PauseMenu
+          onResume={() => setShowPause(false)}
+          onSettings={() => { setShowPause(false); setShowSettings(true); }}
+        />
+      )}
+
+      {showSettings && (
+        <SettingsModal
+          settings={settings}
+          onChange={handleSettingsChange}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
+
       {bossWarning && (
         <div className="boss-warning">
           <h2>⚠ {bossWarning} INCOMING ⚠</h2>
@@ -1688,6 +1971,13 @@ export function App(): JSX.Element {
         <div className="ascension-banner">
           <h2>★ ASCENSION ★</h2>
           <p>{ascensionMsg}</p>
+        </div>
+      )}
+
+      {transcendMsg && (
+        <div className="ascension-banner" style={{ background: "rgba(139,92,246,0.15)", borderColor: "#c084fc" }}>
+          <h2 style={{ color: "#c084fc" }}>✦ TRANSCENDENCE ✦</h2>
+          <p>{transcendMsg}</p>
         </div>
       )}
 

@@ -66,6 +66,7 @@ export interface WeaponDef {
   maxLevel: number;
   color: string;
   ascendedId?: string;     // id of ascended form
+  transcendedId?: string;  // id of transcended form
   matchingTokenId?: string;
 }
 
@@ -132,6 +133,7 @@ export interface PlayerWeaponState {
   level: number;
   xp: number;
   ascended: boolean;
+  transcended: boolean;
 }
 
 export interface PlayerState {
@@ -154,6 +156,7 @@ export interface PlayerState {
   revives: number;
   dx: number;  // facing
   dy: number;
+  moving: boolean;   // currently has input
   invulnMs: number;
   // computed stat bonuses from tokens + upgrades
   bonusDamage: number;
@@ -263,6 +266,7 @@ export interface GameState {
   phase: GamePhase;
   tick: number;
   timeRemainingMs: number;
+  elapsedMs: number;         // time since game start
   wave: number;
   totalWaves: number;
   sharedXp: number;
@@ -343,10 +347,17 @@ export type ClientEnvelope =
   | { type: "lobby_update"; characterId?: string; starterWeaponId?: string; cosmetic?: CosmeticChoice; blacklistedWeapons?: string[]; blacklistedTokens?: string[] }
   | { type: "ready"; ready: boolean }
   | { type: "start_game" }
-  | { type: "input"; dx: number; dy: number }
+  | { type: "input"; dx: number; dy: number; cursorX?: number; cursorY?: number }
   | { type: "pick_upgrade"; upgradeId: string }
   | { type: "vote_continue" }
+  | { type: "update_settings"; settings: PlayerSettings }
   | { type: "leave" };
+
+export interface PlayerSettings {
+  ownProjectileOpacity: number;   // 0.0 - 1.0
+  otherProjectileOpacity: number; // 0.0 - 1.0
+  targetingMode: "closest" | "cursor";
+}
 
 export type ServerEnvelope =
   | { type: "joined"; playerId: string }
@@ -354,6 +365,7 @@ export type ServerEnvelope =
   | { type: "state"; state: GameState }
   | { type: "level_up"; offer: LevelUpOffer }
   | { type: "ascension"; playerId: string; weaponName: string; ascendedName: string }
+  | { type: "transcendence"; playerId: string; weaponName: string }
   | { type: "boss_warning"; bossName: string }
   | { type: "results"; result: GameResult }
   | { type: "error"; message: string };

@@ -418,6 +418,25 @@ summary { cursor: pointer; color: #94a3b8; font-size: 12px; }
 .breakdown th { color: #94a3b8; text-align: left; font-weight: 600; }
 .breakdown td { color: #e2e8f0; }
 
+/* ── Settings & Pause ────────────────────────────────────────────────── */
+
+.settings-modal { max-width: 420px; text-align: left; }
+.settings-modal h2 { text-align: center; }
+.settings-group {
+  margin-bottom: 16px;
+}
+.settings-group label {
+  display: block; color: #e2e8f0; font-size: 13px; margin-bottom: 6px;
+}
+.settings-group input[type="range"] {
+  width: 100%;
+  accent-color: #14b8a6;
+  height: 6px;
+}
+.pause-modal { max-width: 320px; }
+.pause-modal h2 { font-size: 2rem; letter-spacing: 0.1em; }
+.transcended { border-color: #c084fc !important; box-shadow: 0 0 8px rgba(192,132,252,0.3); }
+
 /* ── Scrollbar ───────────────────────────────────────────────────────── */
 
 ::-webkit-scrollbar { width: 6px; }

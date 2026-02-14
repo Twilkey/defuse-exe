@@ -17,6 +17,7 @@ import {
   type PlayerWeaponState, type UpgradeDef, type CosmeticChoice,
   type GameResult, type PlayerResult, type LevelUpOffer, type WeaponDef,
   type BreakableState, type PickupState, type PickupType,
+  type PlayerSettings,
   // constants
   TICK_RATE, TICK_MS, GAME_DURATION_MS, ARENA_W, ARENA_H, SPAWN_MARGIN,
   PLAYER_RADIUS, PICKUP_BASE_RANGE, BASE_XP_TO_LEVEL, XP_GROWTH,
@@ -25,13 +26,16 @@ import {
   ELITE_HP_MULT, ELITE_DMG_MULT, ELITE_XP_MULT,
   MINIBOSS_HP_MULT, MINIBOSS_DMG_MULT, MINIBOSS_XP_MULT,
   BOSS_HP_MULT, BOSS_DMG_MULT, BOSS_XP_MULT,
-  MAX_WEAPONS, MAX_TOKENS, WEAPON_MAX_LEVEL, LEVEL_UP_CHOICES,
+  MAX_WEAPONS, MAX_TOKENS, WEAPON_MAX_LEVEL, WEAPON_ASCEND_LEVEL, WEAPON_TRANSCEND_LEVEL,
+  LEVEL_UP_CHOICES,
   CRIT_MULTIPLIER, INVULN_AFTER_HIT_MS, POST_BOSS_WAVE_INTERVAL,
   DAMAGE_NUMBER_LIFETIME, MAX_ENEMIES, MAX_PROJECTILES, MAX_XP_GEMS,
   MAX_BLACKLISTED_WEAPONS, MAX_BLACKLISTED_TOKENS,
   MAX_BREAKABLES, BREAKABLE_SPAWN_INTERVAL_MS, BREAKABLE_SPAWN_COUNT,
   BREAKABLE_HP_CRATE, BREAKABLE_HP_BARREL, BREAKABLE_HP_CRYSTAL,
   PICKUP_LIFETIME_MS, PICKUP_COLLECT_RANGE,
+  ENEMY_SPAWN_INTERVAL_MS, MINIBOSS_SPAWN_TIME_MS, MINIBOSS_REPEAT_MS,
+  BOSS_SPAWN_TIME_MS, BOSS_REPEAT_MS,
   // data
   CHARACTERS, WEAPONS, ASCENDED_WEAPONS, TOKENS, ASCENSION_RECIPES,
   ENEMIES, MINIBOSS_IDS, BOSS_IDS,
@@ -79,6 +83,9 @@ interface PlayerSocket {
   playerId: string;
   inputDx: number;
   inputDy: number;
+  cursorX: number;
+  cursorY: number;
+  settings: PlayerSettings;
   pendingUpgrade: LevelUpOffer | null;
 }
 
@@ -92,7 +99,10 @@ interface GameRoom {
   groupBonuses: Record<string, number>;
   nextBombZoneMs: number;
   nextBreakableMs: number;
-  waveTimer: number; // ms until next wave
+  enemySpawnTimer: number;      // ms until next enemy batch
+  nextMinibossMs: number;       // ms until next miniboss
+  nextBossMs: number;           // ms until next boss
+  elapsedMs: number;            // total elapsed game time
   bossKilledThisRound: boolean;
   pendingLevelUps: Set<string>;
 }
@@ -112,7 +122,10 @@ function getOrCreateRoom(roomId: string): GameRoom {
       groupBonuses: {},
       nextBombZoneMs: BOMB_ZONE_SPAWN_INTERVAL_MS / 2,
       nextBreakableMs: 5000,
-      waveTimer: 5000,
+      enemySpawnTimer: 1000,
+      nextMinibossMs: MINIBOSS_SPAWN_TIME_MS,
+      nextBossMs: BOSS_SPAWN_TIME_MS,
+      elapsedMs: 0,
       bossKilledThisRound: false,
       pendingLevelUps: new Set(),
     };
@@ -153,7 +166,7 @@ function createPlayerState(lp: LobbyPlayer): PlayerState {
     hp: charDef.baseHp,
     maxHp: charDef.baseHp,
     speed: charDef.baseSpeed,
-    weapons: [{ weaponId: lp.starterWeaponId, level: 1, xp: 0, ascended: false }],
+    weapons: [{ weaponId: lp.starterWeaponId, level: 1, xp: 0, ascended: false, transcended: false }],
     tokens: [],
     cosmetic: lp.cosmetic,
     alive: true,
@@ -163,6 +176,7 @@ function createPlayerState(lp: LobbyPlayer): PlayerState {
     bombsDefused: 0,
     revives: 0,
     dx: 0, dy: -1,
+    moving: false,
     invulnMs: 2000,
     bonusDamage: 0, bonusSpeed: 0, bonusArea: 0, bonusProjectiles: 0,
     bonusPierce: 0, bonusCrit: 0, bonusPickupRange: 0, bonusMaxHp: 0,
@@ -179,7 +193,10 @@ function startGame(room: GameRoom): void {
   room.weaponCooldowns = new Map();
   room.nextBombZoneMs = BOMB_ZONE_SPAWN_INTERVAL_MS / 2;
   room.nextBreakableMs = 3000;
-  room.waveTimer = 3000;
+  room.enemySpawnTimer = 1000;
+  room.nextMinibossMs = MINIBOSS_SPAWN_TIME_MS;
+  room.nextBossMs = BOSS_SPAWN_TIME_MS;
+  room.elapsedMs = 0;
   room.bossKilledThisRound = false;
   room.pendingLevelUps = new Set();
 
@@ -191,6 +208,7 @@ function startGame(room: GameRoom): void {
     phase: "active",
     tick: 0,
     timeRemainingMs: GAME_DURATION_MS,
+    elapsedMs: 0,
     wave: 0,
     totalWaves: 20,
     sharedXp: 0,
@@ -230,42 +248,32 @@ function spawnEdge(): { x: number; y: number } {
   }
 }
 
-function spawnWave(room: GameRoom): void {
+/* ── Continuous enemy spawning ───────────────────────────────────────── */
+
+function spawnEnemies(room: GameRoom): void {
   const g = room.game!;
-  g.wave++;
+  room.enemySpawnTimer -= TICK_MS;
+  if (room.enemySpawnTimer > 0) return;
+  room.enemySpawnTimer = ENEMY_SPAWN_INTERVAL_MS;
 
-  const wave = g.wave;
+  if (g.enemies.length >= MAX_ENEMIES) return;
+
   const playerCount = g.players.filter(p => p.alive).length || 1;
-  const scaleFactor = 1 + (wave - 1) * 0.12;
-  const hpScale = 1 + (wave - 1) * 0.15;
+  // difficulty ramps with elapsed time (minutes)
+  const minutesElapsed = room.elapsedMs / 60000;
+  const diffScale = 1 + minutesElapsed * 0.15;
+  const hpScale = 1 + minutesElapsed * 0.12;
 
-  // Wave modifiers — 30% chance starting wave 3
-  type WaveMod = { label: string; speedMult: number; armor: number; hpMult: number };
-  const WAVE_MODS: WaveMod[] = [
-    { label: "⚡ Speed Surge",   speedMult: 1.6, armor: 0,  hpMult: 1 },
-    { label: "🛡 Armored Wave",  speedMult: 1,   armor: 5,  hpMult: 1.3 },
-    { label: "💀 Elite Swarm",   speedMult: 1.2, armor: 2,  hpMult: 1.2 },
-    { label: "🐜 Tiny Terrors",  speedMult: 1.8, armor: 0,  hpMult: 0.5 },
-    { label: "🔥 Berserkers",    speedMult: 1.4, armor: 0,  hpMult: 0.8 },
-  ];
-  let waveMod: WaveMod | null = null;
-  if (wave >= 3 && Math.random() < 0.3) {
-    waveMod = WAVE_MODS[Math.floor(Math.random() * WAVE_MODS.length)];
-    g.waveModifier = waveMod.label;
-  } else {
-    g.waveModifier = undefined;
-  }
+  // how many enemies per spawn batch — ramps up over time
+  const batchSize = Math.min(
+    MAX_ENEMIES - g.enemies.length,
+    Math.floor((5 + minutesElapsed * 2) * playerCount)
+  );
 
-  const modSpeed = waveMod?.speedMult ?? 1;
-  const modArmor = waveMod?.armor ?? 0;
-  const modHp = waveMod?.hpMult ?? 1;
-
-  // Normal enemies
-  const eligible = ENEMIES.filter(e => e.minWave <= wave && e.spawnWeight > 0);
+  const eligible = ENEMIES.filter(e => e.spawnWeight > 0);
   const totalWeight = eligible.reduce((s, e) => s + e.spawnWeight, 0);
-  const enemyCount = Math.min(MAX_ENEMIES - g.enemies.length, Math.floor((15 + wave * 5) * playerCount));
 
-  for (let i = 0; i < enemyCount; i++) {
+  for (let i = 0; i < batchSize; i++) {
     let roll = Math.random() * totalWeight;
     let def = eligible[0];
     for (const e of eligible) {
@@ -273,56 +281,68 @@ function spawnWave(room: GameRoom): void {
       if (roll <= 0) { def = e; break; }
     }
     const pos = spawnEdge();
-    const isElite = wave >= 6 && Math.random() < 0.05 + (wave - 6) * 0.01;
+    const isElite = minutesElapsed >= 2 && Math.random() < 0.03 + minutesElapsed * 0.008;
     const rank = isElite ? "elite" as const : "normal" as const;
     const hpMult = isElite ? ELITE_HP_MULT : 1;
-    const dmgMult = isElite ? ELITE_DMG_MULT : 1;
     g.enemies.push({
       id: uid(),
       defId: def.id,
       x: pos.x, y: pos.y,
-      hp: Math.floor(def.baseHp * hpScale * hpMult * modHp),
-      maxHp: Math.floor(def.baseHp * hpScale * hpMult * modHp),
+      hp: Math.floor(def.baseHp * hpScale * hpMult),
+      maxHp: Math.floor(def.baseHp * hpScale * hpMult),
       rank,
       stunMs: 0,
-      speedMult: modSpeed,
-      armor: modArmor,
+      speedMult: 1,
+      armor: 0,
     });
   }
 
-  // Mini-boss every 5 waves starting at 10
-  if (wave >= 10 && wave % 5 === 0 && !g.bossActive) {
+  // track a notional "wave" number for display (increments every spawn batch)
+  g.wave++;
+  g.waveEnemiesRemaining = g.enemies.length;
+}
+
+/* ── Timed boss/miniboss spawning ───────────────────────────────────── */
+
+function spawnTimedBosses(room: GameRoom): void {
+  const g = room.game!;
+  const hpScale = 1 + room.elapsedMs / 60000 * 0.12;
+  const playerCount = g.players.filter(p => p.alive).length || 1;
+
+  // miniboss timer
+  room.nextMinibossMs -= TICK_MS;
+  if (room.nextMinibossMs <= 0) {
+    room.nextMinibossMs = MINIBOSS_REPEAT_MS;
     const mbId = pick(MINIBOSS_IDS);
     const mbDef = getEnemy(mbId)!;
     const pos = spawnEdge();
     g.enemies.push({
       id: uid(), defId: mbDef.id,
       x: pos.x, y: pos.y,
-      hp: Math.floor(mbDef.baseHp * hpScale * MINIBOSS_HP_MULT / mbDef.baseHp * mbDef.baseHp),
-      maxHp: Math.floor(mbDef.baseHp * hpScale * MINIBOSS_HP_MULT / mbDef.baseHp * mbDef.baseHp),
+      hp: Math.floor(mbDef.baseHp * hpScale * MINIBOSS_HP_MULT / mbDef.baseHp * mbDef.baseHp * playerCount * 0.7),
+      maxHp: Math.floor(mbDef.baseHp * hpScale * MINIBOSS_HP_MULT / mbDef.baseHp * mbDef.baseHp * playerCount * 0.7),
       rank: "miniboss", stunMs: 0, speedMult: 1, armor: 0,
     });
     broadcast(room, { type: "boss_warning", bossName: mbDef.name });
   }
 
-  // Boss at wave 20 (or every POST_BOSS_WAVE_INTERVAL after)
-  const isBossWave = wave === 20 || (g.postBoss && wave > 20 && (wave - 20) % POST_BOSS_WAVE_INTERVAL === 0);
-  if (isBossWave) {
+  // boss timer
+  room.nextBossMs -= TICK_MS;
+  if (room.nextBossMs <= 0) {
+    room.nextBossMs = BOSS_REPEAT_MS;
     const bossId = pick(BOSS_IDS);
     const bossDef = getEnemy(bossId)!;
     const pos = spawnEdge();
     g.enemies.push({
       id: uid(), defId: bossDef.id,
       x: pos.x, y: pos.y,
-      hp: Math.floor(bossDef.baseHp * hpScale),
-      maxHp: Math.floor(bossDef.baseHp * hpScale),
+      hp: Math.floor(bossDef.baseHp * hpScale * playerCount * 0.8),
+      maxHp: Math.floor(bossDef.baseHp * hpScale * playerCount * 0.8),
       rank: "boss", stunMs: 0, speedMult: 1, armor: 0,
     });
     g.bossActive = true;
     broadcast(room, { type: "boss_warning", bossName: bossDef.name });
   }
-
-  g.waveEnemiesRemaining = g.enemies.length;
 }
 
 /* ── Weapon firing ──────────────────────────────────────────────────── */
@@ -344,13 +364,14 @@ function fireWeapons(room: GameRoom): void {
         continue;
       }
 
-      // Apply level + bonus scaling
-      const lvlMult = 1 + (ws.level - 1) * 0.2;
-      const damage = Math.floor(wDef.baseDamage * lvlMult * (1 + player.bonusDamage));
-      const area = wDef.baseArea * (1 + player.bonusArea);
-      const projCount = wDef.baseProjectiles + Math.floor(player.bonusProjectiles);
-      const pierce = wDef.basePierce + Math.floor(player.bonusPierce);
-      const cooldown = Math.max(50, wDef.baseCooldownMs * (1 / (1 + player.bonusAttackSpeed)));
+      // Apply level + bonus scaling (gentler curve for 30 levels)
+      const lvlMult = 1 + (ws.level - 1) * 0.08;
+      const transcendMult = ws.transcended ? 1.5 : 1; // 50% bonus for transcended
+      const damage = Math.floor(wDef.baseDamage * lvlMult * transcendMult * (1 + player.bonusDamage));
+      const area = wDef.baseArea * (1 + player.bonusArea) * (ws.transcended ? 1.25 : 1);
+      const projCount = wDef.baseProjectiles + Math.floor(player.bonusProjectiles) + (ws.transcended ? 2 : 0);
+      const pierce = wDef.basePierce + Math.floor(player.bonusPierce) + (ws.transcended ? 3 : 0);
+      const cooldown = Math.max(50, wDef.baseCooldownMs * (1 / (1 + player.bonusAttackSpeed)) * (ws.transcended ? 0.8 : 1));
 
       cdMap.set(cdKey, cooldown);
 
@@ -361,9 +382,19 @@ function fireWeapons(room: GameRoom): void {
         if (d < nearDist) { nearDist = d; nearEnemy = e; }
       }
 
+      // Determine aim direction based on player settings
+      const ps = room.sockets.get(player.id);
+      const targeting = ps?.settings?.targetingMode ?? "closest";
+
       let faceDx = player.dx || 0;
       let faceDy = player.dy || -1;
-      if (nearEnemy && nearDist < 500) {
+      if (targeting === "cursor" && ps && (ps.cursorX !== 0 || ps.cursorY !== 0)) {
+        // aim toward cursor world position
+        faceDx = ps.cursorX - player.x;
+        faceDy = ps.cursorY - player.y;
+        const len = Math.sqrt(faceDx * faceDx + faceDy * faceDy) || 1;
+        faceDx /= len; faceDy /= len;
+      } else if (nearEnemy && nearDist < 500) {
         faceDx = nearEnemy.x - player.x;
         faceDy = nearEnemy.y - player.y;
         const len = Math.sqrt(faceDx * faceDx + faceDy * faceDy) || 1;
@@ -854,7 +885,7 @@ function applyUpgrade(room: GameRoom, playerId: string, upgradeId: string): void
   switch (option.kind) {
     case "new_weapon":
       if (option.weaponId && player.weapons.length < MAX_WEAPONS) {
-        player.weapons.push({ weaponId: option.weaponId, level: 1, xp: 0, ascended: false });
+        player.weapons.push({ weaponId: option.weaponId, level: 1, xp: 0, ascended: false, transcended: false });
         room.weaponCooldowns.get(playerId)?.set(option.weaponId, 0);
       }
       break;
@@ -864,6 +895,7 @@ function applyUpgrade(room: GameRoom, playerId: string, upgradeId: string): void
         if (ws && ws.level < WEAPON_MAX_LEVEL) {
           ws.level++;
           checkAscension(room, player, ws);
+          checkTranscendence(room, player, ws);
         }
       }
       break;
@@ -872,7 +904,10 @@ function applyUpgrade(room: GameRoom, playerId: string, upgradeId: string): void
         player.tokens.push(option.tokenId);
         recalcBonuses(room, player);
         // check ascensions for all weapons
-        for (const ws of player.weapons) checkAscension(room, player, ws);
+        for (const ws of player.weapons) {
+          checkAscension(room, player, ws);
+          checkTranscendence(room, player, ws);
+        }
       }
       break;
     case "player_stat":
@@ -929,7 +964,7 @@ function recalcBonuses(room: GameRoom, player: PlayerState): void {
 
 function checkAscension(room: GameRoom, player: PlayerState, ws: PlayerWeaponState): void {
   if (ws.ascended) return;
-  if (ws.level < WEAPON_MAX_LEVEL) return;
+  if (ws.level < WEAPON_ASCEND_LEVEL) return;
   const recipe = ASCENSION_RECIPES.find(r => r.weaponId === ws.weaponId);
   if (!recipe) return;
   if (!player.tokens.includes(recipe.tokenId)) return;
@@ -944,6 +979,17 @@ function checkAscension(room: GameRoom, player: PlayerState, ws: PlayerWeaponSta
   ws.level = 1; // reset level for ascended growth
 
   broadcast(room, { type: "ascension", playerId: player.id, weaponName: oldName, ascendedName: ascDef.name });
+}
+
+function checkTranscendence(room: GameRoom, player: PlayerState, ws: PlayerWeaponState): void {
+  if (ws.transcended) return;
+  if (!ws.ascended) return; // must be ascended first
+  if (ws.level < WEAPON_TRANSCEND_LEVEL) return;
+
+  const wDef = getWeapon(ws.weaponId);
+  ws.transcended = true;
+  const wName = wDef?.name ?? ws.weaponId;
+  broadcast(room, { type: "transcendence", playerId: player.id, weaponName: wName });
 }
 
 /* ── Bomb zones ─────────────────────────────────────────────────────── */
@@ -1283,7 +1329,7 @@ function endGame(room: GameRoom, outcome: "victory" | "defeat"): void {
   const result: GameResult = {
     outcome,
     wave: g.wave,
-    timeElapsedMs: GAME_DURATION_MS - g.timeRemainingMs,
+    timeElapsedMs: room.elapsedMs,
     players,
     podium,
   };
@@ -1309,13 +1355,17 @@ function tick(room: GameRoom): void {
 
   g.tick++;
   g.timeRemainingMs -= TICK_MS;
+  room.elapsedMs += TICK_MS;
+  g.elapsedMs = room.elapsedMs;
 
   // move players
   for (const [pid, ps] of room.sockets) {
     const player = g.players.find(p => p.id === pid);
     if (!player || !player.alive) continue;
     const dx = ps.inputDx, dy = ps.inputDy;
-    if (dx !== 0 || dy !== 0) {
+    const isMoving = dx !== 0 || dy !== 0;
+    player.moving = isMoving;
+    if (isMoving) {
       const len = Math.sqrt(dx * dx + dy * dy) || 1;
       const ndx = dx / len, ndy = dy / len;
       const spd = player.speed * (1 + player.bonusSpeed + (room.groupBonuses["speed"] ?? 0)) / TICK_RATE;
@@ -1326,12 +1376,9 @@ function tick(room: GameRoom): void {
     }
   }
 
-  // wave timer
-  room.waveTimer -= TICK_MS;
-  if (room.waveTimer <= 0 && g.phase === "active") {
-    room.waveTimer = g.wave < 5 ? 55000 : 60000;
-    spawnWave(room);
-  }
+  // continuous enemy spawning + timed bosses
+  spawnEnemies(room);
+  spawnTimedBosses(room);
 
   // systems
   applyPassives(room);
@@ -1446,7 +1493,7 @@ wss.on("connection", (ws) => {
         room.lobby.players.push(lp);
         if (room.lobby.players.length === 1) room.lobby.hostId = playerId;
 
-        const ps: PlayerSocket = { ws, playerId, inputDx: 0, inputDy: 0, pendingUpgrade: null };
+        const ps: PlayerSocket = { ws, playerId, inputDx: 0, inputDy: 0, pendingUpgrade: null, cursorX: 0, cursorY: 0, settings: { ownProjectileOpacity: 1, otherProjectileOpacity: 0.7, targetingMode: "closest" } };
         room.sockets.set(playerId, ps);
 
         sendTo(ps, { type: "joined", playerId });
@@ -1483,7 +1530,17 @@ wss.on("connection", (ws) => {
       }
       case "input": {
         const ps = r.sockets.get(playerId);
-        if (ps) { ps.inputDx = msg.dx; ps.inputDy = msg.dy; }
+        if (ps) {
+          ps.inputDx = msg.dx;
+          ps.inputDy = msg.dy;
+          if (msg.cursorX !== undefined) ps.cursorX = msg.cursorX;
+          if (msg.cursorY !== undefined) ps.cursorY = msg.cursorY;
+        }
+        break;
+      }
+      case "update_settings": {
+        const ps = r.sockets.get(playerId);
+        if (ps) ps.settings = msg.settings;
         break;
       }
       case "pick_upgrade": {
@@ -1499,7 +1556,6 @@ wss.on("connection", (ws) => {
           g.postBoss = true;
           g.phase = "active";
           g.timeRemainingMs = 999999999; // unlimited
-          r.waveTimer = 5000;
           broadcastState(r);
         }
         break;
