@@ -33,7 +33,8 @@ export function PhaserGame({
     if (!container || gameRef.current) return;
 
     const scene = new GameScene();
-    const game = new Phaser.Game({
+    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    const config: Phaser.Types.Core.GameConfig = {
       type: Phaser.AUTO,
       width: container.clientWidth || 1280,
       height: container.clientHeight || 720,
@@ -41,12 +42,14 @@ export function PhaserGame({
       scene: [scene],
       backgroundColor: "#0a0f1a",
       audio: { noAudio: true },
-      render: { antialias: true, pixelArt: false },
+      render: { antialias: true, antialiasGL: true, roundPixels: false, pixelArt: false },
       scale: {
         mode: Phaser.Scale.RESIZE,
         autoCenter: Phaser.Scale.CENTER_BOTH,
       },
-    });
+    };
+    (config as Phaser.Types.Core.GameConfig & { resolution?: number }).resolution = dpr;
+    const game = new Phaser.Game(config);
 
     gameRef.current = game;
     sceneRef.current = scene;

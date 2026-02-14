@@ -1877,6 +1877,9 @@ export function App(): JSX.Element {
             setLevelUp(null);
             break;
           case "state":
+            if (msg.state.phase === "results") {
+              break;
+            }
             if (
               lastGameStateRef.current
               && lastGameStateRef.current.phase === "active"
@@ -1888,7 +1891,9 @@ export function App(): JSX.Element {
             setGameState(msg.state);
             lastGameStateRef.current = msg.state;
             setLobby(null);
-            setResult(null);
+            if (msg.state.phase === "active" || msg.state.phase === "vote_continue") {
+              setResult(null);
+            }
             if (msg.state.phase === "vote_continue") setLevelUp(null);
             break;
           case "level_up":

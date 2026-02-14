@@ -76,6 +76,7 @@ export class GameScene extends Phaser.Scene {
 
   create(): void {
     this.gfx = this.add.graphics();
+    this.cameras.main.setRoundPixels(false);
     this.hudTopText = this.add.text(0, 0, "", {
       fontFamily: "Inter, sans-serif",
       fontSize: "12px",
@@ -336,6 +337,10 @@ export class GameScene extends Phaser.Scene {
       this.gfx.fillCircle(p.x, p.y, 5);
     }
 
+    const projectileCount = state.projectiles.length;
+    const fxDetailScale = projectileCount > 320 ? 0.58 : projectileCount > 220 ? 0.72 : projectileCount > 140 ? 0.86 : 1;
+    const allowExtraFx = fxDetailScale > 0.7;
+
     for (const proj of state.projectiles) {
       const p = worldToScreen(proj.x, proj.y, camX, camY, width, height);
       const isEnemy = proj.ownerId === "__enemy__";
@@ -344,42 +349,99 @@ export class GameScene extends Phaser.Scene {
         : proj.ownerId === myId
           ? settings.ownProjectileOpacity
           : settings.otherProjectileOpacity;
+      const visAlpha = Math.max(0.08, alpha * fxDetailScale);
 
       if (proj.pattern === "beam") {
         const len = 300;
         const beamColor = toColor(proj.color, 0xffffff);
-        this.gfx.lineStyle(8, beamColor, Math.max(0.08, alpha * 0.25));
-        this.gfx.lineBetween(p.x, p.y, p.x + proj.dx * len, p.y + proj.dy * len);
-        this.gfx.lineStyle(3, beamColor, Math.max(0.2, alpha));
-        this.gfx.lineBetween(p.x, p.y, p.x + proj.dx * len, p.y + proj.dy * len);
+        const ex = p.x + proj.dx * len;
+        const ey = p.y + proj.dy * len;
+        this.gfx.lineStyle(8, beamColor, Math.max(0.07, visAlpha * 0.23));
+        this.gfx.lineBetween(p.x, p.y, ex, ey);
+        this.gfx.lineStyle(3, beamColor, Math.max(0.16, visAlpha));
+        this.gfx.lineBetween(p.x, p.y, ex, ey);
         if (proj.weaponId === "laser_drill") {
-          this.gfx.lineStyle(1, 0xffffff, Math.max(0.1, alpha * 0.6));
-          this.gfx.lineBetween(p.x, p.y, p.x + proj.dx * len, p.y + proj.dy * len);
+          this.gfx.lineStyle(1, 0xffffff, Math.max(0.08, visAlpha * 0.55));
+          this.gfx.lineBetween(p.x, p.y, ex, ey);
+        } else if (allowExtraFx && (proj.weaponId === "railgun" || proj.weaponId === "omega_railgun")) {
+          const nx = -proj.dy;
+          const ny = proj.dx;
+          const spread = proj.weaponId === "omega_railgun" ? 8 : 5;
+          this.gfx.lineStyle(2, 0xe0f2fe, Math.max(0.1, visAlpha * 0.7));
+          this.gfx.lineBetween(p.x + nx * spread, p.y + ny * spread, ex + nx * spread, ey + ny * spread);
+          this.gfx.lineBetween(p.x - nx * spread, p.y - ny * spread, ex - nx * spread, ey - ny * spread);
+          this.gfx.fillStyle(0xe0f2fe, Math.max(0.12, visAlpha * 0.8));
+          this.gfx.fillCircle(ex, ey, proj.weaponId === "omega_railgun" ? 4 : 3);
         }
         continue;
       }
 
       if (proj.pattern === "ring") {
-        this.gfx.lineStyle(2, toColor(proj.color, 0xffffff), Math.max(0.1, alpha * 0.8));
+        this.gfx.lineStyle(2, toColor(proj.color, 0xffffff), Math.max(0.08, visAlpha * 0.8));
         this.gfx.strokeCircle(p.x, p.y, proj.area);
         if (proj.weaponId === "absolute_zero") {
-          this.gfx.lineStyle(1, 0xffffff, Math.max(0.1, alpha * 0.5));
+          this.gfx.lineStyle(1, 0xffffff, Math.max(0.08, visAlpha * 0.5));
           this.gfx.strokeCircle(p.x, p.y, proj.area * 0.7);
+        } else if (allowExtraFx && proj.weaponId === "frost_ring") {
+          this.gfx.lineStyle(1, 0xe0f2fe, Math.max(0.08, visAlpha * 0.52));
+          for (let i = 0; i < 8; i++) {
+            const a = (i / 8) * Math.PI * 2;
+            const cx = p.x + Math.cos(a) * proj.area;
+            const cy = p.y + Math.sin(a) * proj.area;
+            this.gfx.strokeCircle(cx, cy, 2.2);
+          }
         }
         continue;
       }
 
       if (proj.pattern === "ground") {
         const splatColor = toColor(proj.color, 0xffffff);
-        this.gfx.fillStyle(splatColor, Math.max(0.08, alpha * 0.22));
+        this.gfx.fillStyle(splatColor, Math.max(0.06, visAlpha * 0.2));
         this.gfx.fillCircle(p.x, p.y, proj.area);
-        this.gfx.fillStyle(splatColor, Math.max(0.08, alpha * 0.18));
+        this.gfx.fillStyle(splatColor, Math.max(0.06, visAlpha * 0.16));
         this.gfx.fillCircle(p.x + proj.area * 0.25, p.y - proj.area * 0.15, proj.area * 0.35);
         this.gfx.fillCircle(p.x - proj.area * 0.2, p.y + proj.area * 0.2, proj.area * 0.25);
         if (proj.weaponId === "mine_deployer") {
-          this.gfx.lineStyle(1, 0xffffff, Math.max(0.12, alpha * 0.7));
+          this.gfx.lineStyle(1, 0xffffff, Math.max(0.08, visAlpha * 0.65));
           this.gfx.lineBetween(p.x, p.y - 6, p.x, p.y + 6);
           this.gfx.lineBetween(p.x - 6, p.y, p.x + 6, p.y);
+        } else if (allowExtraFx && (proj.weaponId === "toxic_sprayer" || proj.weaponId === "plague_engine")) {
+          this.gfx.fillStyle(0xd9f99d, Math.max(0.08, visAlpha * 0.2));
+          const blobCount = proj.weaponId === "plague_engine" ? 6 : 3;
+          for (let i = 0; i < blobCount; i++) {
+            const a = i * (Math.PI * 2 / blobCount);
+            this.gfx.fillCircle(
+              p.x + Math.cos(a) * proj.area * 0.35,
+              p.y + Math.sin(a) * proj.area * 0.35,
+              Math.max(2, proj.area * (proj.weaponId === "plague_engine" ? 0.18 : 0.1)),
+            );
+          }
+        }
+        continue;
+      }
+
+      if (proj.pattern === "area") {
+        const a = Math.atan2(proj.dy, proj.dx);
+        const areaColor = toColor(proj.color, 0xffffff);
+        this.gfx.lineStyle(2, areaColor, Math.max(0.08, visAlpha * 0.82));
+        if (proj.weaponId === "energy_blade" || proj.weaponId === "void_scythe") {
+          const r = Math.max(24, proj.area * 0.72);
+          const spread = proj.weaponId === "void_scythe" ? 1.45 : 1.15;
+          this.gfx.beginPath();
+          this.gfx.arc(p.x, p.y, r, a - spread, a + spread, false);
+          this.gfx.strokePath();
+          this.gfx.lineStyle(1, 0xffffff, Math.max(0.07, visAlpha * 0.5));
+          this.gfx.beginPath();
+          this.gfx.arc(p.x, p.y, r * 0.75, a - spread * 0.9, a + spread * 0.9, false);
+          this.gfx.strokePath();
+        } else if (proj.weaponId === "shockwave_stamp") {
+          const r = Math.max(20, proj.area * 0.6);
+          this.gfx.strokeRoundedRect(p.x - r, p.y - r, r * 2, r * 2, 5);
+          this.gfx.lineStyle(1, 0xffffff, Math.max(0.07, visAlpha * 0.42));
+          this.gfx.strokeRoundedRect(p.x - r * 0.45, p.y - r * 0.45, r * 0.9, r * 0.9, 4);
+        } else {
+          const r = Math.max(24, proj.area * 0.7);
+          this.gfx.strokeCircle(p.x, p.y, r);
         }
         continue;
       }
@@ -387,10 +449,10 @@ export class GameScene extends Phaser.Scene {
       const size = Math.max(3, proj.area * 0.5);
       const color = isEnemy ? 0xff6666 : toColor(proj.color, 0xffffff);
 
-      this.gfx.fillStyle(color, Math.max(0.15, alpha));
+      this.gfx.fillStyle(color, Math.max(0.12, visAlpha));
       if (isEnemy) {
         this.gfx.fillCircle(p.x, p.y, size * 0.9);
-        this.gfx.lineStyle(1, 0xcc3333, Math.max(0.2, alpha));
+        this.gfx.lineStyle(1, 0xcc3333, Math.max(0.14, visAlpha));
         this.gfx.strokeCircle(p.x, p.y, size * 1.2);
       } else if (proj.weaponId === "plasma_pistol" || proj.weaponId === "supernova_cannon") {
         const a = Math.atan2(proj.dy, proj.dx);
@@ -403,10 +465,20 @@ export class GameScene extends Phaser.Scene {
         this.gfx.fillCircle(tipX, tipY, Math.max(1.5, size * 0.2));
       } else if (proj.weaponId === "pulse_rifle" || proj.weaponId === "annihilator") {
         this.gfx.fillRoundedRect(p.x - size * 1.3, p.y - size * 0.35, size * 2.6, size * 0.7, 2);
+        if (allowExtraFx && proj.weaponId === "annihilator") {
+          this.gfx.fillStyle(0xffffff, Math.max(0.1, visAlpha * 0.5));
+          this.gfx.fillCircle(p.x - size * 1.1, p.y, Math.max(1.2, size * 0.18));
+          this.gfx.fillCircle(p.x - size * 0.2, p.y, Math.max(1.1, size * 0.14));
+        }
       } else if (proj.weaponId === "grenade_launcher" || proj.weaponId === "cluster_nuke") {
         this.gfx.fillCircle(p.x, p.y, size);
         this.gfx.fillStyle(0x111827, Math.max(0.2, alpha * 0.8));
         this.gfx.fillCircle(p.x, p.y, size * 0.35);
+        if (allowExtraFx && proj.weaponId === "cluster_nuke") {
+          this.gfx.fillStyle(color, Math.max(0.1, visAlpha * 0.62));
+          this.gfx.fillCircle(p.x + size * 1.2, p.y, size * 0.35);
+          this.gfx.fillCircle(p.x - size * 1.1, p.y + size * 0.3, size * 0.3);
+        }
       } else if (proj.weaponId === "boomerang_disc") {
         this.gfx.fillCircle(p.x, p.y, size * 1.1);
         this.gfx.fillStyle(0x1f2937, Math.max(0.15, alpha * 0.8));
@@ -422,17 +494,32 @@ export class GameScene extends Phaser.Scene {
         this.gfx.fillCircle(noseX, noseY, size * 0.25);
       } else if (proj.pattern === "orbit") {
         const a = Math.atan2(proj.dy, proj.dx);
-        const tipX = p.x + Math.cos(a) * size * 1.5;
-        const tipY = p.y + Math.sin(a) * size * 1.5;
-        const leftX = p.x + Math.cos(a + 2.5) * size;
-        const leftY = p.y + Math.sin(a + 2.5) * size;
-        const rightX = p.x + Math.cos(a - 2.5) * size;
-        const rightY = p.y + Math.sin(a - 2.5) * size;
+        const tipX = p.x + Math.cos(a) * size * 1.7;
+        const tipY = p.y + Math.sin(a) * size * 1.7;
+        const leftX = p.x + Math.cos(a + 2.6) * size * 1.05;
+        const leftY = p.y + Math.sin(a + 2.6) * size * 1.05;
+        const rightX = p.x + Math.cos(a - 2.6) * size * 1.05;
+        const rightY = p.y + Math.sin(a - 2.6) * size * 1.05;
         this.gfx.fillTriangle(tipX, tipY, leftX, leftY, rightX, rightY);
+        if (proj.weaponId === "drone_swarm" || proj.weaponId === "hivemind_swarm") {
+          this.gfx.lineStyle(1, 0xffffff, Math.max(0.1, visAlpha * 0.62));
+          this.gfx.lineBetween(tipX, tipY, p.x, p.y);
+          if (allowExtraFx && proj.weaponId === "hivemind_swarm") {
+            this.gfx.fillStyle(0xffffff, Math.max(0.08, visAlpha * 0.48));
+            this.gfx.fillCircle(leftX, leftY, Math.max(1, size * 0.16));
+            this.gfx.fillCircle(rightX, rightY, Math.max(1, size * 0.16));
+          }
+        }
       } else if (proj.pattern === "homing") {
         this.gfx.fillEllipse(p.x, p.y, size * 2.6, size * 1.1);
       } else if (proj.pattern === "chain") {
         this.gfx.fillRoundedRect(p.x - size, p.y - size * 0.45, size * 2, size * 0.9, 2);
+        if (allowExtraFx && (proj.weaponId === "lightning_coil" || proj.weaponId === "storm_caller")) {
+          this.gfx.lineStyle(1, 0xffffff, Math.max(0.08, visAlpha * 0.55));
+          this.gfx.lineBetween(p.x - size * 0.8, p.y, p.x - size * 0.2, p.y - size * 0.45);
+          this.gfx.lineBetween(p.x - size * 0.2, p.y - size * 0.45, p.x + size * 0.25, p.y + size * 0.4);
+          this.gfx.lineBetween(p.x + size * 0.25, p.y + size * 0.4, p.x + size * 0.85, p.y - size * 0.1);
+        }
       } else if (proj.pattern === "cone") {
         const a = Math.atan2(proj.dy, proj.dx);
         const tipX = p.x + Math.cos(a) * size * 1.4;
@@ -442,6 +529,12 @@ export class GameScene extends Phaser.Scene {
         const rightX = p.x + Math.cos(a - 2.2) * size * 0.8;
         const rightY = p.y + Math.sin(a - 2.2) * size * 0.8;
         this.gfx.fillTriangle(tipX, tipY, leftX, leftY, rightX, rightY);
+        if (allowExtraFx && (proj.weaponId === "flame_emitter" || proj.weaponId === "inferno_storm")) {
+          this.gfx.lineStyle(1, proj.weaponId === "inferno_storm" ? 0xfef08a : 0xfde68a, Math.max(0.08, visAlpha * 0.55));
+          this.gfx.lineBetween(p.x, p.y, tipX, tipY);
+          this.gfx.lineBetween((p.x + leftX) * 0.5, (p.y + leftY) * 0.5, (p.x + tipX) * 0.65, (p.y + tipY) * 0.65);
+          this.gfx.lineBetween((p.x + rightX) * 0.5, (p.y + rightY) * 0.5, (p.x + tipX) * 0.65, (p.y + tipY) * 0.65);
+        }
       } else {
         this.gfx.fillEllipse(p.x, p.y, size * 2.4, size * 0.95);
       }
@@ -493,13 +586,76 @@ export class GameScene extends Phaser.Scene {
       const charDef = getCharacter(player.characterId);
       const color = toColor(player.cosmetic.colorOverride || charDef?.color, 0x38bdf8);
 
-      this.gfx.lineStyle(2, color, 1);
-      this.gfx.strokeCircle(p.x, p.y - 16, 5);
-      this.gfx.lineBetween(p.x, p.y - 11, p.x, p.y + 4);
-      this.gfx.lineBetween(p.x, p.y - 6, p.x - 7, p.y + 1);
-      this.gfx.lineBetween(p.x, p.y - 6, p.x + 7, p.y + 1);
-      this.gfx.lineBetween(p.x, p.y + 4, p.x - 6, p.y + 13);
-      this.gfx.lineBetween(p.x, p.y + 4, p.x + 6, p.y + 13);
+      const accent = toColor(charDef?.accentColor, 0xe2e8f0);
+      const visual = charDef?.visual ?? "male";
+
+      if (visual === "cat") {
+        this.gfx.fillStyle(color, 0.95);
+        this.gfx.fillEllipse(p.x, p.y - 8, 16, 12);
+        this.gfx.fillTriangle(p.x - 5, p.y - 15, p.x - 1, p.y - 20, p.x - 1, p.y - 13);
+        this.gfx.fillTriangle(p.x + 5, p.y - 15, p.x + 1, p.y - 20, p.x + 1, p.y - 13);
+        this.gfx.lineStyle(2, color, 0.95);
+        this.gfx.lineBetween(p.x - 1, p.y - 2, p.x - 6, p.y + 10);
+        this.gfx.lineBetween(p.x + 1, p.y - 2, p.x + 6, p.y + 10);
+        this.gfx.lineStyle(2, accent, 0.85);
+        this.gfx.strokeCircle(p.x - 7, p.y - 8, 1.2);
+        this.gfx.strokeCircle(p.x + 7, p.y - 8, 1.2);
+        this.gfx.lineStyle(2, color, 0.8);
+        this.gfx.beginPath();
+        this.gfx.arc(p.x + 9, p.y + 1, 7, Math.PI * 0.8, Math.PI * 1.7, false);
+        this.gfx.strokePath();
+      } else if (visual === "ghost_player") {
+        this.gfx.fillStyle(color, 0.32);
+        this.gfx.fillEllipse(p.x, p.y - 8, 18, 24);
+        this.gfx.lineStyle(2, color, 0.95);
+        this.gfx.strokeCircle(p.x, p.y - 17, 6);
+        this.gfx.lineBetween(p.x, p.y - 11, p.x, p.y + 4);
+        this.gfx.lineBetween(p.x, p.y - 6, p.x - 7, p.y + 1);
+        this.gfx.lineBetween(p.x, p.y - 6, p.x + 7, p.y + 1);
+        this.gfx.beginPath();
+        this.gfx.moveTo(p.x - 8, p.y + 4);
+        this.gfx.lineTo(p.x - 4, p.y + 10);
+        this.gfx.lineTo(p.x, p.y + 5);
+        this.gfx.lineTo(p.x + 4, p.y + 10);
+        this.gfx.lineTo(p.x + 8, p.y + 4);
+        this.gfx.strokePath();
+      } else {
+        const thick = player.characterId === "juggernaut" ? 3.2 : 2;
+        this.gfx.lineStyle(thick, color, 1);
+        this.gfx.strokeCircle(p.x, p.y - 16, 5);
+        this.gfx.lineBetween(p.x, p.y - 11, p.x, p.y + 4);
+        this.gfx.lineBetween(p.x, p.y - 6, p.x - 7, p.y + 1);
+        this.gfx.lineBetween(p.x, p.y - 6, p.x + 7, p.y + 1);
+        this.gfx.lineBetween(p.x, p.y + 4, p.x - 6, p.y + 13);
+        this.gfx.lineBetween(p.x, p.y + 4, p.x + 6, p.y + 13);
+
+        if (visual === "female") {
+          this.gfx.lineStyle(1.5, accent, 0.9);
+          this.gfx.lineBetween(p.x - 4, p.y - 17, p.x - 6, p.y - 10);
+          this.gfx.lineBetween(p.x + 4, p.y - 17, p.x + 6, p.y - 10);
+          this.gfx.strokeTriangle(p.x - 4, p.y + 2, p.x + 4, p.y + 2, p.x, p.y + 8);
+          if (player.characterId === "medic") {
+            this.gfx.lineStyle(1.5, 0xffffff, 0.9);
+            this.gfx.lineBetween(p.x - 2, p.y - 3, p.x + 2, p.y - 3);
+            this.gfx.lineBetween(p.x, p.y - 5, p.x, p.y - 1);
+          } else if (player.characterId === "hacker") {
+            this.gfx.lineStyle(2, accent, 0.9);
+            this.gfx.lineBetween(p.x - 4, p.y - 16, p.x + 4, p.y - 16);
+          }
+        } else {
+          if (player.characterId === "scout") {
+            this.gfx.lineStyle(2, accent, 0.9);
+            this.gfx.lineBetween(p.x - 5, p.y - 19, p.x + 5, p.y - 17);
+            this.gfx.lineStyle(1.5, accent, 0.8);
+            this.gfx.strokeRect(p.x - 3, p.y - 2, 6, 5);
+          } else if (player.characterId === "juggernaut") {
+            this.gfx.lineStyle(2, accent, 0.85);
+            this.gfx.strokeRect(p.x - 6, p.y - 8, 12, 10);
+            this.gfx.lineBetween(p.x - 8, p.y - 6, p.x - 2, p.y - 2);
+            this.gfx.lineBetween(p.x + 8, p.y - 6, p.x + 2, p.y - 2);
+          }
+        }
+      }
 
       if (player.id === myId) {
         this.gfx.lineStyle(1, 0xffffff, 0.35);
@@ -849,7 +1005,7 @@ export class GameScene extends Phaser.Scene {
       this.voteContinueHit = { x: btnX, y: btnY, w: btnW, h: btnH, id: "vote_continue" };
     }
 
-    if (me && !me.alive && state.phase === "active") {
+    if (me && !me.alive) {
       const panelW = 560;
       const panelH = 200;
       const panelX = width / 2 - panelW / 2;
@@ -866,6 +1022,7 @@ export class GameScene extends Phaser.Scene {
       useUiText(panelX + 18, panelY + 76, `Damage ${me.damageDealt.toLocaleString()}   •   Kills ${me.killCount}   •   XP ${me.xpCollected}   •   Bombs ${me.bombsDefused}`, "#e2e8f0", 12);
       useUiText(panelX + 18, panelY + 104, `Weapons: ${me.weapons.map((w) => `${getWeapon(w.weaponId)?.name ?? w.weaponId} Lv${w.level}`).join(", ") || "None"}`, "#cbd5e1", 11);
       useUiText(panelX + 18, panelY + 126, `Tokens: ${me.tokens.map((id) => TOKENS.find((t) => t.id === id)?.icon ?? id).join(" ") || "None"}`, "#cbd5e1", 11);
+      useUiText(panelX + 18, panelY + 154, "Run ends when all teammates are down.", "#94a3b8", 11);
     }
 
     if (this.frameData.bossWarning) {

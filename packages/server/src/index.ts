@@ -49,6 +49,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let nextId = 1;
 function uid(): number { return nextId++; }
+const ENEMY_SPEED_GLOBAL_MULT = 0.88;
 
 function dist(ax: number, ay: number, bx: number, by: number): number {
   const dx = ax - bx, dy = ay - by;
@@ -447,6 +448,15 @@ function fireWeapons(room: GameRoom): void {
             }
             applyDamage(room, player, enemy, damage);
           }
+          if (g.projectiles.length < MAX_PROJECTILES) {
+            g.projectiles.push({
+              id: uid(), ownerId: player.id, weaponId: ws.weaponId,
+              x: player.x, y: player.y, dx: faceDx, dy: faceDy,
+              speed: Math.max(0, wDef.baseSpeed), damage: 0, pierce: 0, pierced: 0,
+              area, lifeMs: Math.max(120, wDef.baseDuration * TICK_MS * 2),
+              pattern: wDef.pattern, color: wDef.color, hitEnemies: [],
+            });
+          }
           break;
         case "orbit":
           // damage enemies within orbit radius
@@ -455,6 +465,18 @@ function fireWeapons(room: GameRoom): void {
             if (d < area && d > area * 0.4) {
               applyDamage(room, player, enemy, damage);
             }
+          }
+          for (let i = 0; i < projCount && g.projectiles.length < MAX_PROJECTILES; i++) {
+            const a = (i / Math.max(1, projCount)) * Math.PI * 2 + (g.tick * 0.12);
+            g.projectiles.push({
+              id: uid(), ownerId: player.id, weaponId: ws.weaponId,
+              x: player.x + Math.cos(a) * Math.max(18, area * 0.55),
+              y: player.y + Math.sin(a) * Math.max(18, area * 0.55),
+              dx: Math.cos(a), dy: Math.sin(a),
+              speed: Math.max(2, wDef.baseSpeed), damage: 0, pierce: 0, pierced: 0,
+              area: Math.max(8, area * 0.18), lifeMs: Math.max(240, cooldown),
+              pattern: "orbit", color: wDef.color, hitEnemies: [],
+            });
           }
           break;
         case "chain": {
@@ -476,6 +498,15 @@ function fireWeapons(room: GameRoom): void {
             }
             if (!nextTarget) break;
             target = nextTarget;
+          }
+          if (g.projectiles.length < MAX_PROJECTILES) {
+            g.projectiles.push({
+              id: uid(), ownerId: player.id, weaponId: ws.weaponId,
+              x: player.x, y: player.y, dx: faceDx, dy: faceDy,
+              speed: 10, damage: 0, pierce: 0, pierced: 0,
+              area: Math.max(10, area * 0.15), lifeMs: 180,
+              pattern: "chain", color: wDef.color, hitEnemies: [],
+            });
           }
           break;
         }
@@ -530,6 +561,42 @@ function updateProjectiles(room: GameRoom): void {
   for (const proj of g.projectiles) {
     proj.lifeMs -= TICK_MS;
     if (proj.lifeMs <= 0) { toRemove.push(proj.id); continue; }
+
+    if (proj.pattern === "area") {
+      const owner = g.players.find(p => p.id === proj.ownerId);
+      if (owner) {
+        proj.x = owner.x;
+        proj.y = owner.y;
+      }
+      continue;
+    }
+
+    if (proj.pattern === "cone") {
+      const owner = g.players.find(p => p.id === proj.ownerId);
+      if (owner) {
+        proj.x = owner.x + proj.dx * 24;
+        proj.y = owner.y + proj.dy * 24;
+      }
+      continue;
+    }
+
+    if (proj.pattern === "chain") {
+      proj.x += proj.dx * proj.speed;
+      proj.y += proj.dy * proj.speed;
+      continue;
+    }
+
+    if (proj.pattern === "orbit") {
+      const owner = g.players.find(p => p.id === proj.ownerId);
+      if (!owner) { toRemove.push(proj.id); continue; }
+      const curA = Math.atan2(proj.dy, proj.dx) + proj.speed * 0.04;
+      proj.dx = Math.cos(curA);
+      proj.dy = Math.sin(curA);
+      const r = Math.max(18, proj.area * 4.2);
+      proj.x = owner.x + proj.dx * r;
+      proj.y = owner.y + proj.dy * r;
+      continue;
+    }
 
     if (proj.pattern === "ring") {
       // expand ring
@@ -631,7 +698,7 @@ function updateEnemies(room: GameRoom): void {
     if (!nearP) continue;
 
     const rankSpeedMult = enemy.rank === "boss" ? 0.8 : enemy.rank === "miniboss" ? 0.9 : 1;
-    const spdMul = rankSpeedMult * (enemy.speedMult || 1);
+    const spdMul = rankSpeedMult * (enemy.speedMult || 1) * ENEMY_SPEED_GLOBAL_MULT;
 
     if (eDef.enemyClass === "ranged" && nd < 250) {
       // ranged enemies try to keep distance

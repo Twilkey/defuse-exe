@@ -199,7 +199,12 @@ summary { cursor: pointer; color: #94a3b8; font-size: 12px; }
 .game-surface { width: 100%; height: 100%; }
 .game-canvas { display: block; width: 100%; height: 100%; }
 .phaser-root { width: 100%; height: 100%; }
-.phaser-root canvas { display: block; width: 100% !important; height: 100% !important; }
+.phaser-root canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  image-rendering: auto;
+}
 
 /* ── HUD ─────────────────────────────────────────────────────────────── */
 
