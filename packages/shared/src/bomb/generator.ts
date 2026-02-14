@@ -8,9 +8,9 @@ import {
   RoleBrief,
   RuleSpec,
   TalkMode
-} from "../types";
-import { LoadedConfigs } from "../config";
-import { SeededRng } from "../rng";
+} from "../types.js";
+import { LoadedConfigs } from "../config.js";
+import { SeededRng } from "../rng.js";
 
 const capabilityOrder: Capability[] = [
   "wire-vision",

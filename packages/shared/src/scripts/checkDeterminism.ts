@@ -1,6 +1,6 @@
 import path from "node:path";
-import { generateBombSpec } from "../bomb/generator";
-import { loadConfigs } from "../config";
+import { generateBombSpec } from "../bomb/generator.js";
+import { loadConfigs } from "../config.js";
 
 const configs = loadConfigs(path.resolve(process.cwd(), "config"));
 const seeds = ["alpha", "beta", "gamma", "delta", "epsilon"];
