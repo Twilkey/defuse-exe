@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import express from "express";
 import cors from "cors";
@@ -35,6 +37,9 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? "http://localhost:5173")
   .split(",")
   .map((item) => item.trim())
   .filter(Boolean);
+const runtimeDir = path.dirname(fileURLToPath(import.meta.url));
+const sharedConfigPath = path.resolve(runtimeDir, "../../shared/config");
+const clientDistPath = path.resolve(runtimeDir, "../../client/dist");
 
 type ClientConnection = {
   socket: WebSocket;
@@ -62,7 +67,7 @@ type RuntimeInstance = {
   initialTalkBudget: number;
 };
 
-let configs = loadConfigs(path.resolve(process.cwd(), "../shared/config"));
+let configs = loadConfigs(sharedConfigPath);
 const instances = new Map<string, RuntimeInstance>();
 const telemetry: TelemetryRow[] = [];
 
@@ -672,7 +677,7 @@ app.post("/api/admin/reload-config", (req, res) => {
   }
 
   try {
-    configs = loadConfigs(path.resolve(process.cwd(), "../shared/config"));
+    configs = loadConfigs(sharedConfigPath);
     return res.json({ ok: true });
   } catch {
     return res.status(500).json({ error: "Failed to reload config" });
@@ -697,6 +702,21 @@ app.get("/api/telemetry", (req, res) => {
   }
   return res.json({ rows: telemetry.slice(-200) });
 });
+
+if (fs.existsSync(clientDistPath)) {
+  app.use(express.static(clientDistPath));
+  app.get("/", (_req, res) => {
+    res.sendFile(path.join(clientDistPath, "index.html"));
+  });
+} else {
+  app.get("/", (_req, res) => {
+    res.status(200).json({
+      ok: true,
+      service: "defuse-exe-server",
+      message: "Client build not found. Deploy client service or build client artifacts."
+    });
+  });
+}
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
